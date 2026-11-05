@@ -103,6 +103,8 @@ def main():
 
             except socket.timeout:
                 if start_time is not None:
+                    if args.duration > 0:
+                        continue  # Preserve the requested capture window across packet gaps.
                     print("\n\nTimeout - no packets for 1 second")
                     break
                 if time.monotonic() - waiting_since >= args.wait_timeout:
