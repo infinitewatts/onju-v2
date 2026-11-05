@@ -1,15 +1,18 @@
 """Keep the OTA password in macOS Keychain, never argv/stdout or the repository.
 
-Only a SHA-256 verifier is written to the ignored, owner-only firmware header.
+The setup AP needs the password plus the OTA SHA-256 verifier in an ignored,
+owner-only firmware header. Neither is printed.
 Uses Security.framework directly so no secret crosses a subprocess boundary.
 """
 import argparse
 import ctypes as c
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import secrets
+from datetime import date
 
 SERVICE = "Onju Voice OTA"
 
@@ -71,14 +74,33 @@ def password(device: str, create: bool = False) -> bytes:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", required=True)
+    parser.add_argument("--setup-qr", action="store_true", help="Write an owner-only Wi-Fi QR SVG; never print its data")
     args = parser.parse_args()
     value = password(args.device, create=True)
+    if not re.fullmatch(rb"[A-Za-z0-9_-]{43}", value):
+        raise RuntimeError("Stored OTA/setup credential has an unexpected format; no rotation performed")
     target = Path(__file__).resolve().parents[1] / "onjuino/ota_credentials.h"
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write('#pragma once\n#define OTA_PASSWORD_HASH "' + hashlib.sha256(value).hexdigest() + '"\n')
-    print("OTA credential stored/reused in Keychain; private firmware verifier prepared.")
+        f.write('#define SETUP_PASSWORD ' + json.dumps(value.decode("ascii")) + '\n')
+    print("OTA/setup credential stored/reused in Keychain; private firmware header prepared.")
+    if args.setup_qr:
+        import qrcode
+        import qrcode.image.svg
+        suffix = args.device.replace(":", "")[-6:].upper()
+        # Generated passwords are URL-safe, so contain no QR field separators.
+        data = "WIFI:T:WPA;S:onju-" + suffix + "-setup;P:" + value.decode("ascii") + ";H:false;;"
+        image = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage)
+        folder = target.parents[1] / "data"
+        folder.mkdir(exist_ok=True)
+        output = folder / (date.today().isoformat() + "__onju-" + suffix.lower() + "-setup__qr.svg")
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            image.save(f)
+        print("Private setup QR saved:", output)
 
 
 if __name__ == "__main__":

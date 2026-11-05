@@ -1,7 +1,9 @@
 """Exercise flash.sh guards with a fake CLI; never open a physical serial port."""
 import os
+import hashlib
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -17,7 +19,9 @@ class FlashGuardTests(unittest.TestCase):
         sketch.mkdir()
         (sketch / "onjuino.ino").write_text("void setup() {} void loop() {}")
         (sketch / "credentials.h").write_text('#define WIFI_SSID "ONJU_COMPILE_ONLY"\n')
-        (sketch / "ota_credentials.h").write_text('#define OTA_PASSWORD_HASH "' + 'a' * 64 + '"\n')
+        verifier = hashlib.sha256(b's' * 43).hexdigest()
+        (sketch / "ota_credentials.h").write_text('#define OTA_PASSWORD_HASH "' + verifier +
+            '"\n#define SETUP_PASSWORD "' + 's' * 43 + '"\n')
         commands = self.root / "bin"
         commands.mkdir()
         cli = commands / "arduino-cli"
@@ -54,6 +58,7 @@ fi
         result = self.invoke("compile")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FlashSize=16M,PartitionScheme=app3M_fat9M_16MB", self.calls())
+        self.assertEqual(stat.S_IMODE((self.root / "onjuino/build").stat().st_mode), 0o700)
         self.assertNotIn("upload", self.calls())
         self.env["ONJU_FLASH_SIZE"] = "4M"
         result = self.invoke("compile")
@@ -72,6 +77,15 @@ fi
         result = self.invoke("/dev/cu.synthetic")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Invalid OTA verifier", result.stderr)
+        self.assertNotIn("upload", self.calls())
+
+    def test_setup_password_must_match_ota_verifier(self):
+        (self.root / "onjuino/credentials.h").write_text('#define WIFI_SSID "synthetic"\n')
+        header = self.root / "onjuino/ota_credentials.h"
+        header.write_text(header.read_text().replace('s' * 43, 't' * 43))
+        result = self.invoke("/dev/cu.synthetic")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid/mismatched setup credential", result.stderr)
         self.assertNotIn("upload", self.calls())
 
 
