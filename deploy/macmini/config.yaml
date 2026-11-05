@@ -1,0 +1,60 @@
+# Mac mini voice server config. No secrets here; install.sh copies it to
+# pipeline/config.yaml. The voice agent's API key comes from BWS at launch.
+asr:
+  url: "http://127.0.0.1:8100"
+
+conversation:
+  backend: "agentic"
+  stall:
+    enabled: false                 # needs a separate fast-LLM key; off for now
+  agentic:
+    base_url: "http://127.0.0.1:18789/v1"   # pipeline.services.voice_agent
+    api_key: "none"
+    model: "voice-agent"
+    max_tokens: 300
+    message_channel: "onju-voice"
+    voice_prompt: >-
+      [voice: transcribed from a microphone; your reply is spoken by TTS on a
+      small speaker. Plain spoken sentences only, keep it short.]
+
+tts:
+  backend: "local"
+  local:
+    url: "http://127.0.0.1:8880"
+    model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
+    voice: "ryan"
+    lang_code: "English"
+
+vad:
+  threshold: 0.5
+  neg_threshold: 0.35
+  silence_time: 1.5
+  pre_buffer_s: 1.0
+
+network:
+  allowed_devices:
+    onju-8DAB80: "192.168.86.228"
+  udp_host: "0.0.0.0"
+  udp_port: 3000
+  tcp_port: 3001
+  multicast_group: "239.0.0.1"
+  multicast_port: 12345
+  control_host: "127.0.0.1"
+  control_port: 3012               # 3002 is taken by Firecrawl (OrbStack) on the Mini
+
+audio:
+  sample_rate: 16000
+  chunk_size: 512
+  opus_frame_size: 320
+
+device:
+  default_volume: 15
+  default_mic_timeout: 60
+  led_fade: 2
+  led_power: 50
+  led_update_period: 0.25
+  greeting: false
+  greeting_wav: "data/hello_imhere.wav"
+
+logging:
+  level: "INFO"

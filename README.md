@@ -98,6 +98,44 @@ Register the emulator explicitly with the pipeline's
 Its upstream multicast sender uses the LAN interface, so multicast alone does not
 register a loopback-only emulator under the strict IP policy.
 
+### Always-on voice server (Mac mini) with a Claude Code brain
+
+The Mac mini runs four LaunchAgents from a detached checkout of reviewed
+`origin/master` at `~/onju-v2-live`: ASR (`:8100`), TTS (`:8880`), the voice
+agent (`:18789`) and the pipeline. Everything is loopback except the device ports
+(UDP 3000, multicast 12345). The control port is 3012 because Firecrawl holds 3002.
+
+- **Brain:** `pipeline/services/voice_agent.py` is an OpenAI-compatible gateway.
+  It answers each turn with headless `claude -p --bare`, resuming one session per
+  device (it expires after 30 idle minutes). The API key comes from the BWS profile
+  `onju-voice`, with a per-turn `--max-budget-usd` cap.
+- **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
+  the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
+  the board summary, and queue a task. There is no Bash, no file access, and none
+  of the operator's MCPs, hooks or CLAUDE.md. Unlisted tools are denied
+  (`--permission-mode dontAsk`). Queued tasks are tagged `voice (unverified
+  speaker)` and are capped at 10 per hour.
+- **Board relay:** the board lives on the MacBook. `scripts/board_sync.py` runs
+  every 2 minutes (LaunchAgent `com.eric.onju-board-sync`). It moves queued voice
+  tasks into `~/.codex/board.log` as `onju-voice | Voice task | new-task` lines
+  (at-least-once, deduplicated by ID), then pushes a board summary back for
+  read-back. It never dispatches agents or edits `board.md`. Picking up the task
+  is the orchestrator's job.
+
+Install or refresh (after a merge to master):
+```sh
+# Mini
+ssh macmini 'cd ~/onju-v2-live && git fetch -q && git checkout -q --detach origin/master \
+  && uv sync --python 3.13 --extra asr --extra tts-local && deploy/macmini/install.sh'
+# MacBook (board host), from a master checkout
+deploy/macbook/install-board-sync.sh
+```
+On first start, macOS asks the Mini's Python for **Local Network** access. Click
+Allow on the Mini's screen; without it every LAN send fails with `No route to host`.
+Pin the device to the Mini over USB serial (`c`, `server 192.168.86.32`, `exit`).
+Logs: `~/onju-v2-live/logs/com.infinitewatts.onju-*.log`. Restart one service with
+`launchctl kickstart -k gui/$(id -u)/com.infinitewatts.onju-<asr|tts|agent|pipeline>`.
+
 Enable multiple "Google Home" speakers to connect to your Mac Mini for talking to your agent(s).
 
 This repo consists of:
