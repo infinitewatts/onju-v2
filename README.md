@@ -17,9 +17,11 @@ mapping (`BOARD_V3` is upstream's default), OPI PSRAM and power before upload.
 
 Provision a per-device OTA credential with
 `python3 scripts/ota_keychain.py --device AA:BB:CC:DD:EE:FF` on macOS. It creates
-or reuses a password in Keychain, verifies readback and writes only its SHA-256
-verifier to ignored `onjuino/ota_credentials.h` (0600). That verifier is also
-sensitive. Never commit it, Wi-Fi settings or build output. For a placeholder
+or reuses a password in Keychain, verifies readback and writes the setup password
+plus OTA SHA-256 verifier to ignored `onjuino/ota_credentials.h` (0600). Both are
+sensitive. Never commit them, Wi-Fi settings or build output. With the optional
+`setup-qr` extra installed, add `--setup-qr` to write a private join QR SVG in ignored
+`data/`; no credential is printed. For a placeholder
 compile, copy both header templates; upload rejects placeholders. Wi-Fi generation
 still uses the owner-approved Keychain prompt through `flash.sh --regen compile`.
 
@@ -27,13 +29,36 @@ ArduinoOTA is password-gated and available for five minutes after a power cycle,
 when idle on private-address station Wi-Fi; mDNS OTA advertisement is off. Use the
 matching core 3.3.12 uploader, target UDP 3232 and an application image only. The
 router must have **no WAN forwarding** for this service; a private local address
-is not a network firewall. Keep the updater on the trusted LAN. No HTTP updater,
-open provisioning AP or cloud update service is installed. Audio is suspended
+is not a network firewall. Keep the updater on the trusted LAN. No HTTP firmware
+updater or cloud update service is installed. Audio is suspended
 during an accepted update; PSRAM/allocation/decoder failure leaves a maintenance
 path available. Failed authentication must not change the firmware. Password
 authentication does not provide signed firmware or transport encryption. Do not
 claim automatic health-based rollback: upstream Arduino startup may mark a new
 application valid before sketch-level diagnostics. Keep a known USB recovery image.
+
+Home plus four travel networks are stored in bounded NVS profiles. Home is tried
+first; unsuccessful saved-network attempts have a combined approximately 30-second
+budget. Then `onju-XXXXXX-setup` starts a WPA2-protected AP using the same OTA/setup
+password. Join from a phone, open `http://192.168.4.1` if the captive page does not
+appear, select/type a 2.4 GHz network and enter its password. The AP closes after
+a verified successful save or five minutes; timeouts retain existing profiles.
+Serial `P` reboots into a setup window for testing. Runtime disconnect also gates
+microphone transport and retries saved networks before setup. A full list replaces
+the oldest travel entry and retains home. Updated home passwords survive OTA builds.
+HTTP is bound to the AP address; canonical Host/Origin checks and a per-session
+token protect saves. No firmware-update route exists in this portal. Network
+passwords and setup credentials remain recoverable from unencrypted device flash;
+physical possession of the device is a trust boundary.
+
+Joining travel Wi-Fi does **not** make the home Mac mini reachable. The home server
+pin is inactive on travel profiles, preventing an unrelated machine at the same
+private IP from receiving microphone audio. Later options require explicit work:
+a paired portable server on the travel LAN, a VPN travel router plus authenticated
+per-profile server selection, or an encrypted authenticated relay. A phone hotspot
+alone does not extend the home LAN. Do not forward UDP/TCP audio or OTA to the WAN.
+The setup page handles personal Wi-Fi credentials, not hotel captive-login pages
+or enterprise authentication.
 
 Reserve device/server IPs in DHCP. The device re-announces after a minute without
 an accepted TCP connection. Add exact hostname/IP pairs to the server config:
@@ -48,8 +73,8 @@ An empty allowlist rejects all devices; manual/control registration uses the sam
 policy. Names must match `onju-[0-9A-F]{6}`, including conversation filenames.
 These IP controls do not prevent LAN ARP/address spoofing; use an isolated trusted
 network before attaching sensitive tools. Playback volume is capped at 16 in the
-server protocol. The physical mute switch remains disabled for bare-board tests;
-verify its wiring/polarity before enabling it for an assembled unit. The watchdog
+server protocol. The physical mute switch is enabled for the assembled V3 unit;
+verify its state and microphone suppression on the actual device. The watchdog
 gap documented in the pre-flash review remains a desk-test limitation.
 
 Use `.venv` with `.[asr,tts-local,mic]` and Homebrew opus, portaudio and ffmpeg.
@@ -64,6 +89,8 @@ The emulator `tests/test_client.py` now advertises `onju-000001` and listens onl
 on loopback. For that test, explicitly allow `onju-000001: "127.0.0.1"`; do not
 use that mapping for real hardware. Run security regressions with
 `.venv/bin/python -m unittest discover -s tests -p test_security.py -v`.
+Additional regressions: `test_flash.py`, `test_wifi_profiles.py` (native C++ policy
+tests with address/undefined-behavior sanitizers) and `test_mic_receiver.py`.
 Register the emulator explicitly with the pipeline's
 `--device onju-000001=127.0.0.1` flag (add `:ptt` for a file-fed PTT test).
 Its upstream multicast sender uses the LAN interface, so multicast alone does not

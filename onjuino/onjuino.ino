@@ -27,7 +27,7 @@
 #include "audio_compression.h"
 
 #define TOUCH_EN
-#define DISABLE_HARDWARE_MUTE  // Temporary: disable mute switch check
+// The mute switch is connected in this assembled Nest Mini.
 
 // Wi-Fi settings - edit these in credentials.h
 Preferences preferences;
@@ -143,7 +143,7 @@ int16_t convertedMicBuffer[SAMPLE_CHUNK_SIZE]; // For converted values to be sen
 // Audio compression
 #define USE_COMPRESSION true        // Enable μ-law compression (2x bandwidth reduction)
 
-bool mute = false; // track state of mute button
+volatile bool mute = false; // track state of mute button
 
 uint8_t compressedMicBuffer[SAMPLE_CHUNK_SIZE]; // For μ-law compressed audio
 
@@ -174,6 +174,18 @@ i2s_pin_config_t pin_config = {
     .ws_io_num = I2S_WS_PIN,
     .data_out_num = I2S_OUT,
     .data_in_num = I2S_IN};
+
+void enterConfigMode();
+#include "wifi_setup.h"
+
+void applyServerPin() {
+    serverIP = IPAddress(0, 0, 0, 0);
+    // A private IP may name a stranger on a travel LAN. Only home uses the pin.
+    if (homeNetworkTrusted(WiFi.SSID().c_str(), savedNetworks) &&
+        serverIP.fromString(server_hostname) && privateAddress(serverIP)) return;
+    serverIP = IPAddress(0, 0, 0, 0);
+    Serial.println("Server unavailable/unpinned on this network; microphone transport blocked");
+}
 
 void setup()
 {
@@ -206,6 +218,8 @@ void setup()
     Serial.println("Git hash:" + String(GIT_HASH));
 
     pinMode(MUTE, INPUT_PULLUP);
+    mute = digitalRead(MUTE);
+    Serial.println(mute ? "Hardware mute: ON" : "Hardware mute: OFF");
 
 #ifdef SPEAKER_EN
     Serial.println("Setting SPEAKER_EN");
@@ -262,30 +276,8 @@ void setup()
 
     loadConfig();
 
-    WiFi.begin(wifi_ssid.c_str(), wifi_password.c_str());
-
-    Serial.print("Connecting to WiFi");
-
-    int ledindex = 1;
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        delay(300);
-        leds.clear();
-        leds.setPixelColor(ledindex, 40, 40, 40);
-        leds.show();
-        ledindex = (ledindex % 4) + 1; // cycle through middle LEDs index 1-4 while connecting
-        Serial.print(".");
-        if (Serial.available())
-        {
-            char inChar = (char)Serial.read();
-            if (inChar == 'r')
-            {
-                Serial.println("[UART] Reset command from UART");
-                esp_restart();
-            }
-            else if (inChar == 'c') enterConfigMode();
-        }
-    }
+    loadNetworks();
+    connectDeviceWiFi();
     Serial.println(" Connected to WiFi");
     Serial.println(WiFi.localIP());
 
@@ -303,11 +295,7 @@ void setup()
     // A server pin is a private IPv4 address provisioned over serial, never learned
     // from an untrusted TCP peer or mDNS. Ignore legacy cached server_ip values.
     MDNS.begin(desired_hostname);
-    if (!serverIP.fromString(server_hostname) || !privateAddress(serverIP)) {
-        serverIP = IPAddress(0, 0, 0, 0);
-        Serial.println("Server pin required: server <reserved private IPv4>, then exit");
-        enterConfigMode();
-    }
+    applyServerPin();
     announcePresence();
 
     // Password-gated maintenance window: power-cycle to reopen it, no USB needed.
@@ -394,6 +382,21 @@ void setup()
 
 void loop()
 {
+    if (WiFi.status() != WL_CONNECTED) {
+        networkSetupActive = true;
+        serverIP = IPAddress(0, 0, 0, 0);
+        mic_timeout = 0;
+        interruptPlayback = true;
+        if (otaListening) { ArduinoOTA.end(); otaListening = false; }
+        if (isPlaying || opusTaskRunning) { delay(10); return; }
+        connectDeviceWiFi();
+        applyServerPin();
+        udp.stop(); udp.begin(udpPort);
+        tcpServer.end(); tcpServer.begin();
+        MDNS.end(); MDNS.begin(WiFi.getHostname());
+        announcePresence();
+        return;
+    }
     if (otaListening) {
         if (millis() - otaStarted >= 300000 || WiFi.status() != WL_CONNECTED ||
             !privateAddress(WiFi.localIP())) {
@@ -439,6 +442,15 @@ void loop()
             delay(100);
             ESP.restart();
             break;
+        case 'P': {
+            Preferences store;
+            store.begin("onju-wifi", false);
+            store.putBool("setup", true);
+            store.end();
+            Serial.println("Restarting into protected phone setup");
+            ESP.restart();
+            break;
+        }
         case 'M':
             mic_timeout = millis() + (600 * 1000);
             Serial.println("[UART] Turned on mic for 10 min");
@@ -490,7 +502,7 @@ void loop()
     if (client)
     {
         if (serverIP == IPAddress(0, 0, 0, 0) || serverIP != client.remoteIP()) {
-            Serial.println("Rejected TCP peer outside server pin");
+            Serial.println("Rejected TCP peer outside server pin: " + client.remoteIP().toString());
             client.stop();
             return;
         }
@@ -970,7 +982,7 @@ void micTask(void *pvParameters)
     while (1)
     {
         bool currentState = false;
-        if (isPlaying || mute || otaUpdating) // don't listen during playback/mute/update
+        if (isPlaying || mute || otaUpdating || networkSetupActive)
             ;
         else if (!deviceEnabled) // device disabled by double-tap
             ;
@@ -1258,7 +1270,10 @@ void enterConfigMode() {
             command.trim();
 
             if (command == "exit") {
-                saveConfig();
+                if (!saveConfig()) {
+                    Serial.println("Settings not saved; staying in configuration mode");
+                    continue;
+                }
                 Serial.println("Configuration saved. Restarting...");
                 delay(1000);
                 ESP.restart();
@@ -1311,12 +1326,22 @@ void loadConfig() {
     Serial.println("Saved server IP: " + serverIP.toString());
 }
 
-void saveConfig() {
-    preferences.begin("onjuino-config", false);
+bool saveConfig() {
+    const WiFiProfiles previous = savedNetworks;
+    if (!savedNetworks.save(wifi_ssid.c_str(), wifi_password.c_str())) {
+        Serial.println("ERROR: invalid Wi-Fi credentials; settings not saved");
+        return false;
+    }
+    if (!storeNetworks()) { savedNetworks = previous; return false; }
+    if (!preferences.begin("onjuino-config", false)) return false;
     preferences.putString("wifi_ssid", wifi_ssid);
     preferences.putString("wifi_pass", wifi_password);
     preferences.putString("server", server_hostname);
     preferences.putInt("mic_timeout", mic_timeout_default);
     preferences.putUChar("volume", speaker_volume);
+    const bool verified = preferences.getString("server") == server_hostname &&
+        preferences.getString("wifi_ssid") == wifi_ssid && preferences.getString("wifi_pass") == wifi_password &&
+        preferences.getInt("mic_timeout") == mic_timeout_default && preferences.getUChar("volume") == speaker_volume;
     preferences.end();
+    return verified;
 }

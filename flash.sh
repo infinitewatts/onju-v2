@@ -223,10 +223,19 @@ if grep -q 'ONJU_COMPILE_ONLY' "$OUTPUT" || { [ "$TARGET" = onjuino ] && grep -q
 fi
 if [ "$TARGET" = onjuino ]; then
     python3 - "$PROJECT_DIR/ota_credentials.h" <<'PYCHECK'
-import re, sys
+import hashlib, json, re, sys
 from pathlib import Path
-if not re.search(r'^#define OTA_PASSWORD_HASH "[0-9a-fA-F]{64}"$', Path(sys.argv[1]).read_text(), re.M):
+text = Path(sys.argv[1]).read_text()
+verifier = re.search(r'^#define OTA_PASSWORD_HASH "([0-9a-fA-F]{64})"$', text, re.M)
+if not verifier:
     sys.exit("ERROR: Invalid OTA verifier; upload refused.")
+setup = re.search(r'^#define SETUP_PASSWORD ("[^\r\n]*")$', text, re.M)
+try:
+    value = json.loads(setup[1]) if setup else ""
+except ValueError:
+    value = ""
+if not 16 <= len(value.encode("utf-8")) <= 63 or hashlib.sha256(value.encode()).hexdigest() != verifier[1].lower():
+    sys.exit("ERROR: Invalid/mismatched setup credential; upload refused.")
 PYCHECK
 fi
 
