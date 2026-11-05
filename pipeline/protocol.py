@@ -21,6 +21,7 @@ async def send_tcp(ip: str, port: int, header: bytes, data: bytes | None = None,
 
 
 async def send_audio(ip: str, port: int, opus_payload: bytes, mic_timeout: int = 60, volume: int = 14, fade: int = 6):
+    volume = max(0, min(16, int(volume)))
     # header[0]   0xAA for audio
     # header[1:2] mic timeout in seconds (big-endian)
     # header[3]   volume

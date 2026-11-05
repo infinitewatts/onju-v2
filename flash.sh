@@ -22,7 +22,7 @@ case "$TARGET" in
         INO_NAME="m5_echo.ino"
         PORT_GLOBS=("/dev/cu.usbserial-*" "/dev/cu.usbmodem*")
         ;;
-    --*|compile*)
+    --*|compile*|/dev/*)
         # No target specified, treat as flag — default to onjuino
         set -- "$TARGET" "$@"
         TARGET="onjuino"
@@ -85,6 +85,20 @@ for arg in "$@"; do
 done
 
 echo "Target: $TARGET"
+if [ "$TARGET" = onjuino ]; then
+    # Set from esptool flash-id before compiling; never guess the physical size.
+    case "${ONJU_FLASH_SIZE:-}" in
+        16M) PARTITIONS=app3M_fat9M_16MB ;;
+        8M) PARTITIONS=default_8MB ;;
+        4M) PARTITIONS=default ;;
+        *) echo "ERROR: Set ONJU_FLASH_SIZE to detected 4M, 8M or 16M."; exit 1 ;;
+    esac
+    FQBN="$FQBN,FlashSize=$ONJU_FLASH_SIZE,PartitionScheme=$PARTITIONS"
+    if [ ! -f "$PROJECT_DIR/ota_credentials.h" ]; then
+        echo "ERROR: Provision ota_credentials.h, or copy its template for compile-only."
+        exit 1
+    fi
+fi
 
 # -------------------------------------------------------
 # Generate credentials.h (only if missing or --regen)
@@ -172,6 +186,7 @@ if [ "$FORCE_COMPILE" = false ] && [ -d "$BUILD_DIR" ]; then
         [ -z "$NEWER" ] && NEEDS_COMPILE=false
     fi
 fi
+[ "$(cat "$BUILD_DIR/.fqbn" 2>/dev/null || true)" != "$FQBN" ] && NEEDS_COMPILE=true
 
 # -------------------------------------------------------
 # Compile
@@ -187,6 +202,7 @@ compile_firmware() {
             arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
         fi
         echo "Compilation successful!"
+        printf '%s\n' "$FQBN" > "$BUILD_DIR/.fqbn"
     else
         echo "No source changes, skipping compile"
     fi
@@ -201,9 +217,17 @@ fi
 compile_firmware
 
 # Compile placeholders must never reach a board.
-if grep -q 'ONJU_COMPILE_ONLY' "$OUTPUT"; then
+if grep -q 'ONJU_COMPILE_ONLY' "$OUTPUT" || { [ "$TARGET" = onjuino ] && grep -q 'ONJU_COMPILE_ONLY' "$PROJECT_DIR/ota_credentials.h"; }; then
     echo "ERROR: Replace compile-only WiFi settings before upload."
     exit 1
+fi
+if [ "$TARGET" = onjuino ]; then
+    python3 - "$PROJECT_DIR/ota_credentials.h" <<'PYCHECK'
+import re, sys
+from pathlib import Path
+if not re.search(r'^#define OTA_PASSWORD_HASH "[0-9a-fA-F]{64}"$', Path(sys.argv[1]).read_text(), re.M):
+    sys.exit("ERROR: Invalid OTA verifier; upload refused.")
+PYCHECK
 fi
 
 # -------------------------------------------------------
