@@ -174,7 +174,7 @@ def create_app(s: Settings) -> FastAPI:
             # Never retry: the failed run may already have queued a board task.
             # Drop the session so the next turn starts clean.
             log.warning(f"[{device}] claude exit {proc.returncode}: "
-                        f"{redact(err.decode(errors='replace')[-200:])}")
+                        f"{redact(err.decode(errors='replace'))[-200:]}")
             store.drop(device)
             return FALLBACK_REPLY
 

@@ -143,6 +143,13 @@ class AppTests(unittest.TestCase):
         self.post(c)
         self.assertIn("--session-id", self.calls()[-1])
 
+    def test_redact_then_truncate_never_leaks_a_split_key(self):
+        err = "x" * 50 + "Authorization: Bearer " + "S3CRET" * 40 + " tail"
+        logged = voice_agent.redact(err)[-200:]
+        self.assertNotIn("S3CRET", logged)
+        naive = voice_agent.redact(err[-200:])
+        self.assertIn("S3CRET", naive)  # the old order leaked
+
     def test_error_gives_spoken_fallback(self):
         os.environ["FAKE_CLAUDE_MODE"] = "error"
         r = self.post(self.client())
