@@ -93,10 +93,12 @@ class SessionStore:
         self.data.pop(device, None)
 
 
-def build_command(s: Settings, prompt: str, sid: str, new: bool) -> list[str]:
+def build_command(s: Settings, sid: str, new: bool) -> list[str]:
+    """The spoken text goes on stdin, never argv: no option parsing, not in ps."""
     cmd = [
-        s.claude_bin, "-p", prompt,
+        s.claude_bin, "-p",
         "--bare",
+        "--disable-slash-commands",
         "--output-format", "json",
         "--model", s.model,
         "--tools", s.builtin_tools,
@@ -146,30 +148,27 @@ def create_app(s: Settings) -> FastAPI:
         lock = locks.setdefault(device, asyncio.Lock())
         async with lock:
             sid, new = store.get(device, time.time())
-            for attempt in range(2):
-                cmd = build_command(s, text, sid, new)
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd, cwd=s.workdir,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                try:
-                    out, err = await asyncio.wait_for(proc.communicate(), s.timeout)
-                except asyncio.TimeoutError:
-                    proc.kill()
-                    await proc.wait()
-                    log.warning(f"[{device}] claude timed out after {s.timeout}s")
-                    return FALLBACK_REPLY
-                reply = parse_result(out)
-                if proc.returncode == 0 and reply:
-                    store.touch(device, sid, time.time())
-                    return reply
-                log.warning(f"[{device}] claude exit {proc.returncode}: "
-                            f"{err.decode(errors='replace')[-300:]}")
-                if new:
-                    break
-                # A resume can fail if the session is gone; retry once fresh.
-                store.drop(device)
-                sid, new = str(uuid.uuid4()), True
+            proc = await asyncio.create_subprocess_exec(
+                *build_command(s, sid, new), cwd=s.workdir,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(text.encode()), s.timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                log.warning(f"[{device}] claude timed out after {s.timeout}s")
+                return FALLBACK_REPLY
+            reply = parse_result(out)
+            if proc.returncode == 0 and reply:
+                store.touch(device, sid, time.time())
+                return reply
+            # Never retry: the failed run may already have queued a board task.
+            # Drop the session so the next turn starts clean.
+            log.warning(f"[{device}] claude exit {proc.returncode}: "
+                        f"{err.decode(errors='replace')[-200:]}")
+            store.drop(device)
             return FALLBACK_REPLY
 
     @app.post("/v1/chat/completions")

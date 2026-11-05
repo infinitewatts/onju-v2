@@ -99,19 +99,21 @@ class Board:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if self.inbox.exists() and self.inbox.stat().st_size:
                 self.inbox.rename(self.dir / f"claimed-{time.time_ns()}.jsonl")
-        out = []
-        for f in sorted(self.dir.glob("claimed-*.jsonl")):
-            for line in f.read_text().splitlines():
-                try:
-                    out.append({"file": f.name, "entry": json.loads(line)})
-                except ValueError:
-                    continue
+            out = []
+            for f in sorted(self.dir.glob("claimed-*.jsonl")):
+                for line in f.read_text().splitlines():
+                    try:
+                        out.append({"file": f.name, "entry": json.loads(line)})
+                    except ValueError:
+                        continue
         return out
 
     def ack(self, names: list[str]) -> None:
-        for name in names:
-            if CLAIMED_RE.match(name):
-                (self.dir / name).unlink(missing_ok=True)
+        with open(self.dir / ".inbox.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for name in names:
+                if CLAIMED_RE.match(name):
+                    (self.dir / name).unlink(missing_ok=True)
 
     def add_task(self, title: str, detail: str = "") -> str:
         title = clean(title, TITLE_MAX)

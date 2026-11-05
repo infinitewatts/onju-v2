@@ -14,9 +14,10 @@ from pipeline.services import board_mcp, voice_agent
 FAKE_CLAUDE = """#!{python}
 import json, os, sys
 args = sys.argv[1:]
+stdin = sys.stdin.read()
 log = os.environ["FAKE_CLAUDE_LOG"]
 with open(log, "a") as f:
-    f.write(json.dumps(args) + "\\n")
+    f.write(json.dumps({{"args": args, "stdin": stdin}}) + "\\n")
 mode = os.environ.get("FAKE_CLAUDE_MODE", "ok")
 if mode == "fail_resume" and "--resume" in args:
     sys.exit(1)
@@ -40,7 +41,7 @@ class CommandTests(unittest.TestCase):
     def test_locked_down_flags(self):
         with tempfile.TemporaryDirectory() as d:
             s = settings(Path(d), "claude")
-            cmd = voice_agent.build_command(s, "hi", "sid-1", new=True)
+            cmd = voice_agent.build_command(s, "sid-1", new=True)
         self.assertIn("--bare", cmd)
         self.assertIn("--strict-mcp-config", cmd)
         self.assertEqual(cmd[cmd.index("--permission-mode") + 1], "dontAsk")
@@ -49,10 +50,12 @@ class CommandTests(unittest.TestCase):
         self.assertNotIn("--resume", cmd)
         self.assertNotIn("--dangerously-skip-permissions", cmd)
         self.assertIn("--max-budget-usd", cmd)
+        self.assertIn("--disable-slash-commands", cmd)
+        self.assertNotIn("hi", cmd)  # speech never goes in argv
 
     def test_resume_on_existing_session(self):
         with tempfile.TemporaryDirectory() as d:
-            cmd = voice_agent.build_command(settings(Path(d), "claude"), "hi", "sid-1", new=False)
+            cmd = voice_agent.build_command(settings(Path(d), "claude"), "sid-1", new=False)
         self.assertEqual(cmd[cmd.index("--resume") + 1], "sid-1")
         self.assertNotIn("--session-id", cmd)
 
@@ -96,7 +99,7 @@ class AppTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def calls(self):
-        return [json.loads(l) for l in self.log.read_text().splitlines()]
+        return [json.loads(l)["args"] for l in self.log.read_text().splitlines()]
 
     def client(self):
         return TestClient(voice_agent.create_app(settings(self.d, self.fake)))
@@ -114,18 +117,24 @@ class AppTests(unittest.TestCase):
         first, second = self.calls()
         sid = first[first.index("--session-id") + 1]
         self.assertEqual(second[second.index("--resume") + 1], sid)
+        stdins = [json.loads(l)["stdin"] for l in self.log.read_text().splitlines()]
+        self.assertEqual(stdins, ["hi", "again"])
+        self.assertNotIn("again", second)
 
     def test_stream_returns_sse(self):
         r = self.post(self.client(), stream=True)
         self.assertIn("Hello from fake.", r.text)
         self.assertTrue(r.text.rstrip().endswith("data: [DONE]"))
 
-    def test_failed_resume_starts_fresh(self):
+    def test_failed_turn_is_not_retried_and_next_turn_is_fresh(self):
         c = self.client()
         self.post(c)
         os.environ["FAKE_CLAUDE_MODE"] = "fail_resume"
         r = self.post(c)
-        self.assertEqual(r.json()["choices"][0]["message"]["content"], "Hello from fake.")
+        self.assertEqual(r.json()["choices"][0]["message"]["content"], voice_agent.FALLBACK_REPLY)
+        self.assertEqual(len(self.calls()), 2)  # no replay of possible side effects
+        os.environ["FAKE_CLAUDE_MODE"] = "ok"
+        self.post(c)
         self.assertIn("--session-id", self.calls()[-1])
 
     def test_error_gives_spoken_fallback(self):
@@ -229,17 +238,18 @@ class BoardSyncTests(unittest.TestCase):
                                      "source": "voice (unverified speaker)", "device": "onju-8DAB80"}}
 
     def test_deliver_dedups_and_formats(self):
-        log, seen = self.d / "board.log", self.d / "seen"
+        log = self.d / "board.log"
         items = [self.item("voice-0123456789ab"), self.item("voice-0123456789ab"),
                  self.item("bad id; rm -rf"), self.item("voice-aaaaaaaaaaaa", f="claimed-2.jsonl")]
-        n, files = self.bs.deliver(items, log, seen)
+        n, files = self.bs.deliver(items, log)
         self.assertEqual(n, 2)
         self.assertEqual(files, ["claimed-1.jsonl", "claimed-2.jsonl"])
         lines = log.read_text().splitlines()
         self.assertEqual(len(lines), 2)
-        self.assertEqual(lines[0].split(" | ")[1:4], ["onju-voice", "Voice task", "new-task"])
-        self.assertIn("Order breakers / now — two 40A", lines[0])
-        self.assertEqual(self.bs.deliver(items, log, seen)[0], 0)  # redelivery is a no-op
+        self.assertEqual(lines[0].split(" | ")[1:4], ["onju-voice", "Voice task", "voice-request"])
+        self.assertIn("UNTRUSTED", lines[0])
+        self.assertIn('"Order breakers / now — two 40A"', lines[0])
+        self.assertEqual(self.bs.deliver(items, log)[0], 0)  # redelivery is a no-op
         self.assertEqual(len(log.read_text().splitlines()), 2)
 
     def test_snapshot_keeps_today_and_needs_eric(self):

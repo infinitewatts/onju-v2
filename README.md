@@ -112,13 +112,14 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
 - **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
   the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
   the board summary, and queue a task. There is no Bash, no file access, and none
-  of the operator's MCPs, hooks or CLAUDE.md. Unlisted tools are denied
+  of the operator's MCPs, hooks, skills or CLAUDE.md. Speech goes in on stdin, never
+  argv. A failed turn is never retried. Unlisted tools are denied
   (`--permission-mode dontAsk`). Queued tasks are tagged `voice (unverified
   speaker)` and are capped at 10 per hour.
 - **Board relay:** the board lives on the MacBook. `scripts/board_sync.py` runs
   every 2 minutes (LaunchAgent `com.eric.onju-board-sync`). It moves queued voice
-  tasks into `~/.codex/board.log` as `onju-voice | Voice task | new-task` lines
-  (at-least-once, deduplicated by ID), then pushes a board summary back for
+  tasks into `~/.codex/board.log` as `onju-voice | Voice task | voice-request`
+  lines labelled UNTRUSTED (at-least-once, deduplicated against the log), then pushes a board summary back for
   read-back. It never dispatches agents or edits `board.md`. Picking up the task
   is the orchestrator's job.
 
