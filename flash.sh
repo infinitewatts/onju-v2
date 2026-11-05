@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
@@ -40,6 +41,10 @@ esac
 TEMPLATE="$PROJECT_DIR/credentials.h.template"
 OUTPUT="$PROJECT_DIR/credentials.h"
 BUILD_DIR="$PROJECT_DIR/build"
+# Firmware binaries contain Wi-Fi and setup credentials, not just source code.
+[ ! -L "$BUILD_DIR" ] || { echo "ERROR: Refusing symlinked build directory."; exit 1; }
+mkdir -p "$BUILD_DIR"
+chmod 700 "$BUILD_DIR"
 
 # -------------------------------------------------------
 # Ensure dependencies

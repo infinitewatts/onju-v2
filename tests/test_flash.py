@@ -3,6 +3,7 @@ import os
 import hashlib
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -57,6 +58,7 @@ fi
         result = self.invoke("compile")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("FlashSize=16M,PartitionScheme=app3M_fat9M_16MB", self.calls())
+        self.assertEqual(stat.S_IMODE((self.root / "onjuino/build").stat().st_mode), 0o700)
         self.assertNotIn("upload", self.calls())
         self.env["ONJU_FLASH_SIZE"] = "4M"
         result = self.invoke("compile")
