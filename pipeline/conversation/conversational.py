@@ -5,6 +5,7 @@ import re
 from typing import AsyncIterator
 
 from openai import AsyncOpenAI
+from pipeline.security import validate_device_name
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class ConversationalBackend:
     Good for plain LLM chat with no tool use."""
 
     def __init__(self, cfg: dict, device_id: str):
+        validate_device_name(device_id)
         self.cfg = cfg
         self.device_id = device_id
         api_key = _resolve_env(cfg.get("api_key", "none"))

@@ -4,6 +4,7 @@ import re
 from typing import AsyncIterator
 
 from openai import AsyncOpenAI
+from pipeline.security import validate_device_name
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ class AgenticBackend:
     device ID, and runs its own tool loop server-side."""
 
     def __init__(self, cfg: dict, device_id: str):
+        validate_device_name(device_id)
         self.cfg = cfg
         self.device_id = device_id
         self.message_channel = cfg.get("message_channel", "onju-voice")

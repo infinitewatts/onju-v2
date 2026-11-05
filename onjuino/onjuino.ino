@@ -6,6 +6,8 @@
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
 #include <opus.h>
+#include <ArduinoOTA.h>
+#include "ota_credentials.h"
 
 #if __has_include("git_hash.h") // optionally setup post-commit hook to generate git_hash.h
 #include "git_hash.h"
@@ -51,6 +53,36 @@ WiFiUDP udp;
 
 // TCP Settings
 WiFiServer tcpServer(3001);
+unsigned long lastServerContact = 0;
+unsigned long lastAnnouncement = 0;
+unsigned long otaStarted = 0;
+bool otaListening = false;
+volatile bool otaUpdating = false;
+bool audioReady = false;
+bool psramReady = false;
+
+bool validOTAVerifier() {
+    if (strlen(OTA_PASSWORD_HASH) != 64) return false;
+    for (size_t i = 0; i < 64; ++i)
+        if (!strchr("0123456789abcdefABCDEF", OTA_PASSWORD_HASH[i])) return false;
+    return true;
+}
+
+bool privateAddress(IPAddress ip) {
+    return ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+           (ip[0] == 192 && ip[1] == 168);
+}
+
+void announcePresence() {
+    if (WiFi.status() != WL_CONNECTED) return;
+    udp.beginPacket(IPAddress(239, 0, 0, 1), 12345);
+    String message = String(WiFi.getHostname()) + " " + String(GIT_HASH);
+    if (PTT_MODE) message += " PTT";
+    udp.write(reinterpret_cast<const uint8_t *>(message.c_str()), message.length());
+    udp.endPacket();
+    lastAnnouncement = millis();
+    Serial.println("Multicast announcement sent");
+}
 
 volatile bool isPlaying = false;
 uint32_t mic_timeout = 0;
@@ -217,6 +249,7 @@ void setup()
     if (psramInit())
     {
         Serial.println("PSRAM initialized");
+        psramReady = true;
     }
     else
     {
@@ -224,6 +257,7 @@ void setup()
     }
 #else
     Serial.println("PSRAM disabled");
+    psramReady = true;
 #endif
 
     loadConfig();
@@ -249,6 +283,7 @@ void setup()
                 Serial.println("[UART] Reset command from UART");
                 esp_restart();
             }
+            else if (inChar == 'c') enterConfigMode();
         }
     }
     Serial.println(" Connected to WiFi");
@@ -265,44 +300,41 @@ void setup()
     Serial.println("Starting TCP server");
     tcpServer.begin();
 
-    // mDNS: register ourselves and try to resolve server hostname
+    // A server pin is a private IPv4 address provisioned over serial, never learned
+    // from an untrusted TCP peer or mDNS. Ignore legacy cached server_ip values.
     MDNS.begin(desired_hostname);
-
-    if (serverIP != IPAddress(0, 0, 0, 0))
-    {
-        Serial.printf("Using saved server IP: %s\n", serverIP.toString().c_str());
+    if (!serverIP.fromString(server_hostname) || !privateAddress(serverIP)) {
+        serverIP = IPAddress(0, 0, 0, 0);
+        Serial.println("Server pin required: server <reserved private IPv4>, then exit");
+        enterConfigMode();
     }
-    else if (server_hostname != DEFAULT_SERVER_HOSTNAME)
-    {
-        Serial.printf("Resolving server hostname: %s\n", server_hostname.c_str());
-        String queryHost = server_hostname;
-        if (queryHost.endsWith(".local"))
-        {
-            queryHost = queryHost.substring(0, queryHost.length() - 6);
-        }
-        for (int i = 0; i < 10; i++)
-        {
-            IPAddress resolved = MDNS.queryHost(queryHost.c_str());
-            if (resolved != INADDR_NONE)
-            {
-                serverIP = resolved;
-                Serial.printf("Resolved %s -> %s\n", server_hostname.c_str(), serverIP.toString().c_str());
-                break;
-            }
-            delay(200);
-        }
-        if (serverIP == IPAddress(0, 0, 0, 0))
-        {
-            Serial.println("mDNS resolution failed, falling back to multicast discovery");
-        }
-    }
+    announcePresence();
 
-    Serial.println("Sending multicast packet to announce presence");
-    udp.beginPacket(IPAddress(239, 0, 0, 1), 12345);
-    String mcast_string = String(hostname) + " " + String(GIT_HASH);
-    if (PTT_MODE) mcast_string += " PTT";
-    udp.write(reinterpret_cast<const uint8_t *>(mcast_string.c_str()), mcast_string.length());
-    udp.endPacket();
+    // Password-gated maintenance window: power-cycle to reopen it, no USB needed.
+    // Only station Wi-Fi is used; the router must not forward OTA from the WAN.
+    if (privateAddress(WiFi.localIP()) && validOTAVerifier()) {
+        ArduinoOTA.setHostname(desired_hostname);
+        ArduinoOTA.setPasswordHash(OTA_PASSWORD_HASH);
+        ArduinoOTA.setMdnsEnabled(false);
+        ArduinoOTA.onStart([]() {
+            if (ArduinoOTA.getCommand() != U_FLASH) { Update.abort(); return; }
+            otaUpdating = true;
+            mic_timeout = 0;
+            Serial.println("OTA application update started");
+        });
+        ArduinoOTA.onError([](ota_error_t error) {
+            otaUpdating = false;
+            Serial.printf("OTA failed: %u\n", unsigned(error));
+        });
+        ArduinoOTA.begin();
+        otaStarted = millis();
+        otaListening = true;
+        Serial.println("OTA password required; 5 minute LAN maintenance window");
+    }
+    if (!psramReady) {
+        Serial.println("Audio disabled: PSRAM failed; serial config and OTA remain available");
+        return;
+    }
 
     // Device starts enabled; mic is gated by mic_timeout (0 = expired, user must tap or greeting sets it)
     deviceEnabled = true;
@@ -328,8 +360,7 @@ void setup()
     if (wavData == NULL)
     {
         Serial.println("Memory allocation failed!");
-        while (1)
-            ;
+        return; // Preserve the OTA/config recovery path instead of hanging setup.
     }
     else
     {
@@ -348,6 +379,7 @@ void setup()
     if (opus_error != OPUS_OK)
     {
         Serial.printf("Opus decoder create failed: %d\n", opus_error);
+        return;
     }
     else
     {
@@ -357,10 +389,30 @@ void setup()
     xTaskCreatePinnedToCore(micTask, "MicTask", 4096, NULL, 1, NULL, 1);
     xTaskCreatePinnedToCore(updateLedTask, "updateLedTask", 2048, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(touchTask, "TouchTask", 2048, NULL, 2, NULL, 1);
+    audioReady = true;
 }
 
 void loop()
 {
+    if (otaListening) {
+        if (millis() - otaStarted >= 300000 || WiFi.status() != WL_CONNECTED ||
+            !privateAddress(WiFi.localIP())) {
+            ArduinoOTA.end();
+            otaListening = false;
+            Serial.println("OTA maintenance window closed");
+        } else if (!isPlaying && !opusTaskRunning) ArduinoOTA.handle();
+    }
+    if (millis() - lastServerContact >= 60000 && millis() - lastAnnouncement >= 60000)
+        announcePresence();
+    if (!audioReady) {
+        if (Serial.available()) {
+            char command = Serial.read();
+            if (command == 'c') enterConfigMode();
+            if (command == 'r') ESP.restart();
+        }
+        delay(10);
+        return;
+    }
 #if !defined(BOARD_V1) && !defined(DISABLE_HARDWARE_MUTE)
     if (digitalRead(MUTE) && !mute)
     {
@@ -393,13 +445,7 @@ void loop()
             break;
         case 'A':
         {
-            Serial.println("[UART] Sending multicast announcement");
-            udp.beginPacket(IPAddress(239, 0, 0, 1), 12345);
-            String mcast_string = String(WiFi.getHostname()) + " " + String(GIT_HASH);
-            if (PTT_MODE) mcast_string += " PTT";
-            udp.write(reinterpret_cast<const uint8_t *>(mcast_string.c_str()), mcast_string.length());
-            udp.endPacket();
-            Serial.println("[UART] Multicast sent");
+            announcePresence();
             break;
         }
         case 'm':
@@ -443,16 +489,13 @@ void loop()
     WiFiClient client = tcpServer.available();
     if (client)
     {
-        Serial.println("New client connection: " + client.remoteIP().toString());
-
-        if (serverIP != client.remoteIP())
-        {
-            serverIP = client.remoteIP();
-            preferences.begin("onjuino-config", false);
-            preferences.putUInt("server_ip", (uint32_t)serverIP);
-            preferences.end();
-            Serial.println("Server IP saved to NVS");
+        if (serverIP == IPAddress(0, 0, 0, 0) || serverIP != client.remoteIP()) {
+            Serial.println("Rejected TCP peer outside server pin");
+            client.stop();
+            return;
         }
+        lastServerContact = millis();
+        Serial.println("Accepted pinned server: " + client.remoteIP().toString());
 
         // Persistent connection loop: process commands until disconnect or timeout
         while (client.connected() || client.available())
@@ -927,7 +970,7 @@ void micTask(void *pvParameters)
     while (1)
     {
         bool currentState = false;
-        if (isPlaying || mute) // don't listen while playing audio or muted
+        if (isPlaying || mute || otaUpdating) // don't listen during playback/mute/update
             ;
         else if (!deviceEnabled) // device disabled by double-tap
             ;
@@ -1209,6 +1252,7 @@ void enterConfigMode() {
     Serial.println("Available commands: ssid, pass, server, timeout, volume");
 
     while (true) {
+        delay(10); // Yield while offline configuration waits for serial input.
         if (Serial.available()) {
             String command = Serial.readStringUntil('\n');
             command.trim();
@@ -1229,8 +1273,12 @@ void enterConfigMode() {
                 wifi_password = command.substring(5);
                 Serial.println("WiFi password updated");
             } else if (command.startsWith("server ")) {
-                server_hostname = command.substring(7);
-                Serial.println("Server hostname set to: " + server_hostname);
+                IPAddress pin;
+                String value = command.substring(7);
+                if (pin.fromString(value) && privateAddress(pin)) {
+                    server_hostname = value;
+                    Serial.println("Server pin set: " + server_hostname);
+                } else Serial.println("Server pin must be a private IPv4 address");
             } else if (command.startsWith("timeout ")) {
                 mic_timeout_default = command.substring(8).toInt();
                 Serial.println("Mic timeout set to: " + String(mic_timeout_default));
@@ -1252,11 +1300,8 @@ void loadConfig() {
     server_hostname = preferences.getString("server", DEFAULT_SERVER_HOSTNAME);
     mic_timeout_default = preferences.getInt("mic_timeout", DEFAULT_MIC_TIMEOUT);
     speaker_volume = preferences.getUChar("volume", DEFAULT_SPEAKER_VOLUME);
-    uint32_t savedIP = preferences.getUInt("server_ip", 0);
     preferences.end();
-
-    if (savedIP != 0)
-        serverIP = IPAddress(savedIP);
+    serverIP = IPAddress(0, 0, 0, 0); // Legacy learned peer cache is never authority.
 
     Serial.println("Loaded configuration:");
     Serial.println("SSID: " + wifi_ssid);

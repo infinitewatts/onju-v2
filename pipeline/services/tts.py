@@ -51,6 +51,10 @@ async def _local(text: str, config: dict) -> bytes:
         "response_format": "wav",
     }
 
+    for key in ("voice", "lang_code"):
+        if local_cfg.get(key):
+            payload[key] = local_cfg[key]
+
     # Voice cloning: pass ref_audio path (server reads from disk)
     ref_audio = local_cfg.get("ref_audio")
     if ref_audio:

@@ -1,4 +1,5 @@
 import argparse
+import copy
 import asyncio
 import json
 import logging
@@ -37,7 +38,7 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", udp_port))
+    sock.bind((config["network"].get("udp_host", "0.0.0.0"), udp_port))
     sock.setblocking(False)
     log.info(f"UDP  listening on :{udp_port}")
 
@@ -85,8 +86,6 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             continue
 
         device = manager.get_by_ip(addr[0])
-        if device is None and addr[0] == "127.0.0.1":
-            device = manager.get_most_recent()
         if device is None:
             continue
 
@@ -192,8 +191,12 @@ async def multicast_listener(config: dict, manager: DeviceManager):
             continue
         hostname = parts[0]
         ptt = "PTT" in (p.upper() for p in parts)
+        try:
+            device = manager.create_device(hostname, addr[0], ptt=ptt)
+        except ValueError:
+            log.debug("MCAST rejected device identity from %s", addr[0])
+            continue
         log.info(f"DEVICE  {hostname} ({addr[0]}) {'PTT' if ptt else 'VOX'}")
-        device = manager.create_device(hostname, addr[0], ptt=ptt)
         await greet_device(device, config)
 
 
@@ -450,8 +453,12 @@ async def control_server(config: dict, manager: DeviceManager):
             method, path = parts[0], parts[1]
 
             headers = {}
+            header_bytes = 0
             while True:
-                line = await reader.readline()
+                line = await asyncio.wait_for(reader.readline(), timeout=5)
+                header_bytes += len(line)
+                if header_bytes > 8192:
+                    return
                 if line in (b"\r\n", b"\n", b""):
                     break
                 k, _, v = line.decode().partition(":")
@@ -459,7 +466,9 @@ async def control_server(config: dict, manager: DeviceManager):
 
             body = b""
             if cl := int(headers.get("content-length", 0)):
-                body = await reader.readexactly(cl)
+                if cl < 0 or cl > 4096:
+                    return
+                body = await asyncio.wait_for(reader.readexactly(cl), timeout=5)
 
             if path == "/devices" and method == "GET":
                 data = {k: v.to_dict() for k, v in manager.devices.items()}
@@ -469,7 +478,7 @@ async def control_server(config: dict, manager: DeviceManager):
             elif path == "/devices" and method == "POST":
                 payload = json.loads(body)
                 ip = payload["ip"]
-                hostname = payload.get("hostname", f"manual-{ip.replace('.', '-')}")
+                hostname = payload["hostname"]
                 ptt = payload.get("ptt", False)
                 device = manager.create_device(hostname, ip, ptt=ptt)
                 log.info(f"DEVICE  {hostname} ({ip}) {'PTT' if ptt else 'VOX'} (control)")
@@ -490,19 +499,22 @@ async def control_server(config: dict, manager: DeviceManager):
                 _http_respond(writer, 404, "not found")
 
             await writer.drain()
+        except (ValueError, KeyError) as e:
+            _http_respond(writer, 400, "Invalid or unapproved device")
+            await writer.drain()
         except Exception as e:
             log.debug(f"Control request error: {e}")
         finally:
             writer.close()
 
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    server = await asyncio.start_server(handle, "127.0.0.1", port)
     log.info(f"CTRL listening on :{port}")
     async with server:
         await server.serve_forever()
 
 
 def _http_respond(writer: asyncio.StreamWriter, status: int, body: str):
-    reason = {200: "OK", 201: "Created", 404: "Not Found"}.get(status, "OK")
+    reason = {200: "OK", 201: "Created", 400: "Bad Request", 404: "Not Found"}.get(status, "OK")
     writer.write(f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}".encode())
 
 
@@ -548,7 +560,9 @@ async def warmup(config: dict):
     async def _warmup_conversation():
         t0 = time.time()
         try:
-            backend = create_backend(config, "_warmup")
+            warmup_config = copy.deepcopy(config)
+            warmup_config["conversation"].get("conversational", {}).pop("persist_dir", None)
+            backend = create_backend(warmup_config, "onju-000000")
             text = await backend.send("Hi")
             if not text.strip():
                 log.error(f"LLM  warmup FAILED ({time.time() - t0:.1f}s): empty response")

@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Parakeet ASR server")
     parser.add_argument("--port", type=int, default=8100)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--model", default=None, help="Override ASR_MODEL env var")
     args = parser.parse_args()
 

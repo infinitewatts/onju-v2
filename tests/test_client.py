@@ -34,7 +34,7 @@ UDP_PORT = 3000
 TCP_PORT = 3001
 MULTICAST_GROUP = "239.0.0.1"
 MULTICAST_PORT = 12345
-HOSTNAME = "test-client"
+HOSTNAME = "onju-000001"
 
 # u-law compression (matching ESP32 audio_compression.h)
 def encode_ulaw(pcm_int16: np.ndarray) -> bytes:
@@ -110,7 +110,7 @@ class TestClient:
         """Listen for incoming TCP connections from the pipeline server (like ESP32 port 3001)."""
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("0.0.0.0", TCP_PORT))
+        srv.bind(("127.0.0.1", TCP_PORT))
         srv.listen(1)
         srv.settimeout(1.0)
         print(f"TCP server listening on :{TCP_PORT}")

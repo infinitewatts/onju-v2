@@ -4,6 +4,7 @@ import time
 
 from pipeline.conversation import ConversationBackend, create_backend
 from pipeline.vad import VAD
+from pipeline.security import validate_device
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class DeviceManager:
         self.devices: dict[str, Device] = {}
 
     def create_device(self, hostname: str, ip: str, ptt: bool = False) -> Device:
+        validate_device(self.config, hostname, ip)
         device = self.devices.get(hostname)
         if device is None:
             conv = create_backend(self.config, hostname)

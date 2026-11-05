@@ -18,6 +18,10 @@ build/
 
 # Secrets & local config
 pipeline/config.yaml
+onjuino/credentials.h
+onjuino/ota_credentials.h
+onjuino/git_hash.h
+.local-tools/
 m5_echo/credentials.h
 m5_echo/git_hash.h
 

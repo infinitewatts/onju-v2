@@ -125,6 +125,10 @@ vad:
   pre_buffer_s: 1.0
 
 network:
+  # Required exact hostname/IP pairs. Empty means reject every device.
+  # Reserve these addresses in DHCP before using them.
+  allowed_devices: {}
+  # allowed_devices: {onju-8DAB80: "192.168.1.50"}
   udp_port: 3000
   tcp_port: 3001
   multicast_group: "239.0.0.1"

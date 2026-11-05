@@ -22,7 +22,7 @@ case "$TARGET" in
         INO_NAME="m5_echo.ino"
         PORT_GLOBS=("/dev/cu.usbserial-*" "/dev/cu.usbmodem*")
         ;;
-    --*|compile*)
+    --*|compile*|/dev/*)
         # No target specified, treat as flag — default to onjuino
         set -- "$TARGET" "$@"
         TARGET="onjuino"
@@ -85,6 +85,20 @@ for arg in "$@"; do
 done
 
 echo "Target: $TARGET"
+if [ "$TARGET" = onjuino ]; then
+    # Set from esptool flash-id before compiling; never guess the physical size.
+    case "${ONJU_FLASH_SIZE:-}" in
+        16M) PARTITIONS=app3M_fat9M_16MB ;;
+        8M) PARTITIONS=default_8MB ;;
+        4M) PARTITIONS=default ;;
+        *) echo "ERROR: Set ONJU_FLASH_SIZE to detected 4M, 8M or 16M."; exit 1 ;;
+    esac
+    FQBN="$FQBN,FlashSize=$ONJU_FLASH_SIZE,PartitionScheme=$PARTITIONS"
+    if [ ! -f "$PROJECT_DIR/ota_credentials.h" ]; then
+        echo "ERROR: Provision ota_credentials.h, or copy its template for compile-only."
+        exit 1
+    fi
+fi
 
 # -------------------------------------------------------
 # Generate credentials.h (only if missing or --regen)
@@ -133,9 +147,19 @@ else
     fi
     [ -z "$WIFI_PASSWORD" ] && { echo "ERROR: No WiFi password provided."; exit 1; }
 
-    sed -e "s|{{WIFI_SSID}}|${WIFI_SSID}|g" \
-        -e "s|{{WIFI_PASSWORD}}|${WIFI_PASSWORD}|g" \
-        "$TEMPLATE" > "$OUTPUT"
+    # Keep WiFi values out of process arguments and escape C string literals.
+    WIFI_SSID="$WIFI_SSID" WIFI_PASSWORD="$WIFI_PASSWORD" python3 - "$OUTPUT" <<'PYCREDS'
+import os, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.write("#pragma once\n")
+    for name in ("WIFI_SSID", "WIFI_PASSWORD"):
+        f.write("#define " + name + " " + '"' + ''.join('\\%03o' % b for b in os.environ[name].encode('utf-8')) + '"'  + "\n")
+PYCREDS
+    unset WIFI_PASSWORD
     echo "Generated credentials.h"
 fi
 echo ""
@@ -162,6 +186,7 @@ if [ "$FORCE_COMPILE" = false ] && [ -d "$BUILD_DIR" ]; then
         [ -z "$NEWER" ] && NEEDS_COMPILE=false
     fi
 fi
+[ "$(cat "$BUILD_DIR/.fqbn" 2>/dev/null || true)" != "$FQBN" ] && NEEDS_COMPILE=true
 
 # -------------------------------------------------------
 # Compile
@@ -170,8 +195,14 @@ compile_firmware() {
     if [ "$NEEDS_COMPILE" = true ]; then
         echo "Compiling..."
         cd "$PROJECT_DIR"
-        arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        # Arduino ships an Intel-only ctags on this Apple Silicon host.
+        if [ -x "$REPO/.local-tools/ctags/ctags" ]; then
+            arduino-cli compile --build-property "runtime.tools.ctags.path=$REPO/.local-tools/ctags" --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        else
+            arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        fi
         echo "Compilation successful!"
+        printf '%s\n' "$FQBN" > "$BUILD_DIR/.fqbn"
     else
         echo "No source changes, skipping compile"
     fi
@@ -184,6 +215,20 @@ if [ "$COMPILE_ONLY" = true ]; then
 fi
 
 compile_firmware
+
+# Compile placeholders must never reach a board.
+if grep -q 'ONJU_COMPILE_ONLY' "$OUTPUT" || { [ "$TARGET" = onjuino ] && grep -q 'ONJU_COMPILE_ONLY' "$PROJECT_DIR/ota_credentials.h"; }; then
+    echo "ERROR: Replace compile-only WiFi settings before upload."
+    exit 1
+fi
+if [ "$TARGET" = onjuino ]; then
+    python3 - "$PROJECT_DIR/ota_credentials.h" <<'PYCHECK'
+import re, sys
+from pathlib import Path
+if not re.search(r'^#define OTA_PASSWORD_HASH "[0-9a-fA-F]{64}"$', Path(sys.argv[1]).read_text(), re.M):
+    sys.exit("ERROR: Invalid OTA verifier; upload refused.")
+PYCHECK
+fi
 
 # -------------------------------------------------------
 # Detect port
@@ -203,9 +248,7 @@ fi
 echo ""
 echo "Flashing $TARGET to $PORT..."
 
-pkill -f "serial_monitor" 2>/dev/null || true
-pkill -f "python.*serial" 2>/dev/null || true
-sleep 1
+# Serial monitors are owned by their callers; do not kill unrelated processes.
 
 echo "Uploading..."
 cd "$PROJECT_DIR"

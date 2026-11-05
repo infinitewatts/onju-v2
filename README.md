@@ -1,5 +1,74 @@
 # Onju Voice v2 (OnjuClaw) 🍐🦞
 
+## Personal fork: safe local bring-up
+
+This fork tracks upstream and keeps conversation, voice and tool policy on the
+server. Firmware handles audio, touch, transport and maintenance. No server address
+is compiled into it: provision a reserved **private IPv4** pin over serial (`c`,
+`server 192.168.1.10`, `exit`). The first boot requests this pin; other TCP peers
+are rejected, and legacy learned `server_ip` values are ignored. Move to a different
+server with the same serial setting; changing LLM/voice/prompts needs no flash.
+
+Before compilation, read the physical flash size with the installed esptool's
+`flash-id` command. Set `ONJU_FLASH_SIZE=4M`, `8M` or `16M` accordingly. For example,
+`ONJU_FLASH_SIZE=16M ./flash.sh compile` selects two 3 MB OTA app slots on a 16 MB
+chip. Changing the partition scheme requires USB. Confirm the actual PCB pin
+mapping (`BOARD_V3` is upstream's default), OPI PSRAM and power before upload.
+
+Provision a per-device OTA credential with
+`python3 scripts/ota_keychain.py --device AA:BB:CC:DD:EE:FF` on macOS. It creates
+or reuses a password in Keychain, verifies readback and writes only its SHA-256
+verifier to ignored `onjuino/ota_credentials.h` (0600). That verifier is also
+sensitive. Never commit it, Wi-Fi settings or build output. For a placeholder
+compile, copy both header templates; upload rejects placeholders. Wi-Fi generation
+still uses the owner-approved Keychain prompt through `flash.sh --regen compile`.
+
+ArduinoOTA is password-gated and available for five minutes after a power cycle,
+when idle on private-address station Wi-Fi; mDNS OTA advertisement is off. Use the
+matching core 3.3.12 uploader, target UDP 3232 and an application image only. The
+router must have **no WAN forwarding** for this service; a private local address
+is not a network firewall. Keep the updater on the trusted LAN. No HTTP updater,
+open provisioning AP or cloud update service is installed. Audio is suspended
+during an accepted update; PSRAM/allocation/decoder failure leaves a maintenance
+path available. Failed authentication must not change the firmware. Password
+authentication does not provide signed firmware or transport encryption. Do not
+claim automatic health-based rollback: upstream Arduino startup may mark a new
+application valid before sketch-level diagnostics. Keep a known USB recovery image.
+
+Reserve device/server IPs in DHCP. The device re-announces after a minute without
+an accepted TCP connection. Add exact hostname/IP pairs to the server config:
+
+```yaml
+network:
+  allowed_devices:
+    onju-A1B2C3: "192.168.1.50"
+```
+
+An empty allowlist rejects all devices; manual/control registration uses the same
+policy. Names must match `onju-[0-9A-F]{6}`, including conversation filenames.
+These IP controls do not prevent LAN ARP/address spoofing; use an isolated trusted
+network before attaching sensitive tools. Playback volume is capped at 16 in the
+server protocol. The physical mute switch remains disabled for bare-board tests;
+verify its wiring/polarity before enabling it for an assembled unit. The watchdog
+gap documented in the pre-flash review remains a desk-test limitation.
+
+Use `.venv` with `.[asr,tts-local,mic]` and Homebrew opus, portaudio and ffmpeg.
+Control HTTP is bound to 127.0.0.1; ASR defaults to loopback. Start mlx-audio with
+`--host 127.0.0.1 --port 8880`, and keep the LLM/gateway on loopback. For keyless
+transport tests, run `.venv/bin/python -m uvicorn local_llm_stub:app --app-dir scripts
+--host 127.0.0.1 --port 8080`. It always reports that no task was created. Disable
+the cloud stall classifier. Qwen3-TTS CustomVoice needs local `voice: ryan` and
+`lang_code: English`; configure ASR 8100, TTS 8880 and the stub 8080 locally.
+
+The emulator `tests/test_client.py` now advertises `onju-000001` and listens only
+on loopback. For that test, explicitly allow `onju-000001: "127.0.0.1"`; do not
+use that mapping for real hardware. Run security regressions with
+`.venv/bin/python -m unittest discover -s tests -p test_security.py -v`.
+Register the emulator explicitly with the pipeline's
+`--device onju-000001=127.0.0.1` flag (add `:ptt` for a file-fed PTT test).
+Its upstream multicast sender uses the LAN interface, so multicast alone does not
+register a loopback-only emulator under the strict IP policy.
+
 Enable multiple "Google Home" speakers to connect to your Mac Mini for talking to your agent(s).
 
 This repo consists of:
