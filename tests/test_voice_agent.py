@@ -64,6 +64,12 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(voice_agent.parse_result(b'{"result": "x", "is_error": true}'), "")
         self.assertEqual(voice_agent.parse_result(b"not json"), "")
 
+    def test_redact(self):
+        out = voice_agent.redact("auth failed sk-ant-api03-AbC_d-9 and Authorization: Bearer xyz ok")
+        self.assertNotIn("sk-ant-api03", out)
+        self.assertNotIn("xyz", out)
+        self.assertIn("auth failed", out)
+
     def test_extract_last_user_message(self):
         body = {"messages": [{"role": "user", "content": "old"},
                              {"role": "assistant", "content": "a"},

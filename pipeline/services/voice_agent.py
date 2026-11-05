@@ -31,6 +31,8 @@ log = logging.getLogger("voice_agent")
 
 DEVICE_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_USER_CHARS = 4000
+SECRET_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]+|(?:api[_-]?key|authorization|bearer)\S*\s*[:=]?\s*(?:bearer\s+)?\S+",
+                       re.IGNORECASE)
 FALLBACK_REPLY = "Sorry, I couldn't finish that one. Try asking again."
 
 DEFAULT_POLICY = """\
@@ -115,6 +117,11 @@ def build_command(s: Settings, sid: str, new: bool) -> list[str]:
     return cmd
 
 
+def redact(text: str) -> str:
+    """Strip anything key-shaped before stderr reaches a persistent log."""
+    return SECRET_RE.sub("[redacted]", text)
+
+
 def parse_result(stdout: bytes) -> str:
     """Extract the reply text from `claude -p --output-format json`."""
     try:
@@ -167,7 +174,7 @@ def create_app(s: Settings) -> FastAPI:
             # Never retry: the failed run may already have queued a board task.
             # Drop the session so the next turn starts clean.
             log.warning(f"[{device}] claude exit {proc.returncode}: "
-                        f"{err.decode(errors='replace')[-200:]}")
+                        f"{redact(err.decode(errors='replace')[-200:])}")
             store.drop(device)
             return FALLBACK_REPLY
 
