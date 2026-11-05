@@ -133,9 +133,19 @@ else
     fi
     [ -z "$WIFI_PASSWORD" ] && { echo "ERROR: No WiFi password provided."; exit 1; }
 
-    sed -e "s|{{WIFI_SSID}}|${WIFI_SSID}|g" \
-        -e "s|{{WIFI_PASSWORD}}|${WIFI_PASSWORD}|g" \
-        "$TEMPLATE" > "$OUTPUT"
+    # Keep WiFi values out of process arguments and escape C string literals.
+    WIFI_SSID="$WIFI_SSID" WIFI_PASSWORD="$WIFI_PASSWORD" python3 - "$OUTPUT" <<'PYCREDS'
+import os, sys
+from pathlib import Path
+out = Path(sys.argv[1])
+fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+os.fchmod(fd, 0o600)
+with os.fdopen(fd, "w") as f:
+    f.write("#pragma once\n")
+    for name in ("WIFI_SSID", "WIFI_PASSWORD"):
+        f.write("#define " + name + " " + '"' + ''.join('\\%03o' % b for b in os.environ[name].encode('utf-8')) + '"'  + "\n")
+PYCREDS
+    unset WIFI_PASSWORD
     echo "Generated credentials.h"
 fi
 echo ""
@@ -170,7 +180,12 @@ compile_firmware() {
     if [ "$NEEDS_COMPILE" = true ]; then
         echo "Compiling..."
         cd "$PROJECT_DIR"
-        arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        # Arduino ships an Intel-only ctags on this Apple Silicon host.
+        if [ -x "$REPO/.local-tools/ctags/ctags" ]; then
+            arduino-cli compile --build-property "runtime.tools.ctags.path=$REPO/.local-tools/ctags" --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        else
+            arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$INO_NAME" || exit 1
+        fi
         echo "Compilation successful!"
     else
         echo "No source changes, skipping compile"
@@ -184,6 +199,12 @@ if [ "$COMPILE_ONLY" = true ]; then
 fi
 
 compile_firmware
+
+# Compile placeholders must never reach a board.
+if grep -q 'ONJU_COMPILE_ONLY' "$OUTPUT"; then
+    echo "ERROR: Replace compile-only WiFi settings before upload."
+    exit 1
+fi
 
 # -------------------------------------------------------
 # Detect port
@@ -203,9 +224,7 @@ fi
 echo ""
 echo "Flashing $TARGET to $PORT..."
 
-pkill -f "serial_monitor" 2>/dev/null || true
-pkill -f "python.*serial" 2>/dev/null || true
-sleep 1
+# Serial monitors are owned by their callers; do not kill unrelated processes.
 
 echo "Uploading..."
 cd "$PROJECT_DIR"

@@ -37,7 +37,7 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
 
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", udp_port))
+    sock.bind((config["network"].get("udp_host", "0.0.0.0"), udp_port))
     sock.setblocking(False)
     log.info(f"UDP  listening on :{udp_port}")
 
@@ -495,7 +495,7 @@ async def control_server(config: dict, manager: DeviceManager):
         finally:
             writer.close()
 
-    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    server = await asyncio.start_server(handle, config["network"].get("control_host", "127.0.0.1"), port)
     log.info(f"CTRL listening on :{port}")
     async with server:
         await server.serve_forever()
