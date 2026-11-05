@@ -74,7 +74,9 @@ policy. Names must match `onju-[0-9A-F]{6}`, including conversation filenames.
 These IP controls do not prevent LAN ARP/address spoofing; use an isolated trusted
 network before attaching sensitive tools. Playback volume is capped at 16 in the
 server protocol. The physical mute switch is enabled for the assembled V3 unit;
-verify its state and microphone suppression on the actual device. The watchdog
+verify its state and microphone suppression on the actual device. A centre
+double-tap disables the device until one centre tap or sliding the switch to
+mic-on (orange hidden) re-enables it; 0xDD alone does not. The watchdog
 gap documented in the pre-flash review remains a desk-test limitation.
 
 Use `.venv` with `.[asr,tts-local,mic]` and Homebrew opus, portaudio and ffmpeg.

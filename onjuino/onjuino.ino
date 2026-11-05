@@ -426,6 +426,11 @@ void loop()
     else if (!digitalRead(MUTE) && mute)
     {
         mute = false;
+        // Sliding to mic-on is a deliberate physical request to listen, so it also
+        // clears a double-tap disable; otherwise the mic stays silently dead.
+        deviceEnabled = true;
+        tapPendingArm = false;
+        doubleTapArmed = false;
         setLed(0, 255, 50, 255, 10); // faster fade green
         mic_timeout = millis() + 60000; // 60s timeout when unmuted
     }
