@@ -55,6 +55,31 @@ class MicrophoneReceiverTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertTrue(exists)
 
+    def test_short_packet_gap_preserves_requested_capture_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "gap.wav"
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as chooser:
+                chooser.bind(("127.0.0.1", 0))
+                port = chooser.getsockname()[1]
+            child = subprocess.Popen([sys.executable, "-u", str(Path(__file__).with_name("test_mic.py")),
+                "--port", str(port), "--device-ip", "127.0.0.1", "--duration", "3",
+                "--wait-timeout", "2", "--output", str(output)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                self.assertIn("Listening", child.stdout.readline())
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                    sender.sendto(b"\xff" * 512, ("127.0.0.1", port))
+                    time.sleep(1.3)
+                    sender.sendto(b"\xff" * 512, ("127.0.0.1", port))
+                child.communicate(timeout=6)
+                self.assertEqual(child.returncode, 0)
+                with wave.open(str(output)) as f:
+                    self.assertEqual(f.getnframes(), 1024)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+
 
 if __name__ == "__main__":
     unittest.main()
