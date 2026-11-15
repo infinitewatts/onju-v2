@@ -7,7 +7,7 @@ Runs on the board's host (the MacBook), on a timer:
    Delivery is at-least-once; IDs already in the board log are skipped.
 2. Pushes a short board summary back so the voice agent can read the board.
 
-It never dispatches agents or edits board.md. Stdlib only.
+It reads the generated board-view.md; it never dispatches agents or edits the board. Stdlib only.
 
     python3 scripts/board_sync.py --host macmini
 """
@@ -83,7 +83,7 @@ def deliver(items: list[dict], board_log: Path) -> tuple[int, list[str]]:
 
 
 def snapshot(board_md: Path) -> str:
-    """Latest 'Today' section plus the Needs Eric table's task and next-action columns."""
+    """Latest Today section plus Needs Eric rows (legacy or generated ledger view)."""
     text = board_md.read_text()
     sections = re.split(r"(?m)^## ", text)
     out = []
@@ -95,7 +95,7 @@ def snapshot(board_md: Path) -> str:
         rows = []
         for line in needs.splitlines():
             cells = [c.strip() for c in line.strip().strip("|").split("|")]
-            if len(cells) >= 3 and not set(cells[0]) <= set("- ") and cells[0] != "Task / tab (pane)":
+            if len(cells) >= 3 and not set(cells[0]) <= set("- ") and cells[0] not in {"Task / tab (pane)", "Task"}:
                 rows.append(f"- {cells[0]}: {cells[1]}. {cells[2]}")
         out.append("## Needs Eric\n" + "\n".join(rows))
     return "\n\n".join(out)[:SNAPSHOT_MAX] + "\n"
@@ -104,7 +104,7 @@ def snapshot(board_md: Path) -> str:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="macmini")
-    p.add_argument("--board-md", default="~/.codex/board.md")
+    p.add_argument("--board-md", default="~/.codex/board-view.md")
     p.add_argument("--board-log", default="~/.codex/board.log")
     p.add_argument("--lock", default="~/.local/state/onju-board-sync/lock")
     a = p.parse_args()
