@@ -120,7 +120,7 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
   every 2 minutes (LaunchAgent `com.eric.onju-board-sync`). It moves queued voice
   tasks into `~/.codex/board.log` as `onju-voice | Voice task | voice-request`
   lines labelled UNTRUSTED (at-least-once, deduplicated against the log), then pushes a board summary back for
-  read-back. It never dispatches agents or edits `board.md`. Picking up the task
+  read-back from the generated `~/.codex/board-view.md`. It never dispatches agents or edits the board. Picking up the task
   is the orchestrator's job.
 
 Install or refresh (after a merge to master):

@@ -1,7 +1,7 @@
 #!/bin/zsh -f
 # MacBook (board host): relay voice board requests from the Mac mini every 2 min.
 # Appends voice tasks to ~/.codex/board.log and pushes a board summary to the Mini.
-# It never dispatches agents or edits board.md. Uninstall:
+# It never dispatches agents or edits the generated board-view.md. Uninstall:
 #   launchctl bootout gui/$(id -u)/com.eric.onju-board-sync
 set -euo pipefail
 REPO="${0:A:h:h:h}"
@@ -19,7 +19,7 @@ cat > "$PL" <<PLIST
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key><array>
-    <string>/usr/bin/python3</string>
+    <string>/opt/homebrew/bin/python3</string>
     <string>$BIN</string>
     <string>--host</string><string>macmini</string>
   </array>

@@ -265,6 +265,16 @@ class BoardSyncTests(unittest.TestCase):
         self.assertEqual(self.bs.deliver(items, log)[0], 0)  # redelivery is a no-op
         self.assertEqual(len(log.read_text().splitlines()), 2)
 
+    def test_snapshot_generated_ledger_board(self):
+        md = self.d / "board-view.md"
+        md.write_text("# Board (generated from the ledger; do not edit)\n\n"
+                      "## Needs Eric\n\n| Task | Dept | Question | Waiting since | Verified |\n"
+                      "| --- | --- | --- | --- | --- |\n"
+                      "| Repair relay | it | Approve reload | yesterday | today |\n\n"
+                      "## it\n\n| Task | State |\n| Other work | working |\n")
+        self.assertEqual(self.bs.snapshot(md),
+                         "## Needs Eric\n- Repair relay: it. Approve reload\n")
+
     def test_snapshot_keeps_today_and_needs_eric(self):
         md = self.d / "board.md"
         md.write_text("# Task board\nintro\n\n## Today — Thu\n\n- item one\n\n## Earlier\n- old\n\n"
