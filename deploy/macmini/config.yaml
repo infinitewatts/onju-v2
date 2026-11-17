@@ -22,7 +22,7 @@ tts:
   local:
     url: "http://127.0.0.1:8880"
     model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
-    voice: "ryan"
+    voice: "aiden"
     lang_code: "English"
 
 vad:
