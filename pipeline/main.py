@@ -24,6 +24,8 @@ from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, o
 from pipeline.services import asr, tts
 from pipeline.security import validate_device
 from pipeline.voice_pilot import PilotError, VoicePilot, QUESTION
+from pipeline.bridge_runtime import BridgeRuntime
+from pipeline.orchestrator_bridge import BridgeError
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +43,9 @@ async def _queue_utterance(queue, device, audio, *, reserved=False):
     if not reserved:
         device.queued_utterances = getattr(device, "queued_utterances", 0) + 1
     try:
-        await queue.put((device, audio))
+        ref = getattr(device, "bridge_capture_ref", None)
+        device.bridge_capture_ref = None
+        await queue.put((device, audio, ref) if ref is not None else (device, audio))
     except BaseException:
         device.queued_utterances -= 1
         raise
@@ -101,7 +105,7 @@ async def _speak_pilot_question(config, pilot, question_id, device):
             device.processing = False
 
 
-async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue):
+async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue, bridge=None):
     """Receive u-law audio from ESP32 devices, run VAD or PTT buffering, queue complete utterances."""
     udp_port = config["network"]["udp_port"]
     chunk_bytes = config["audio"]["chunk_size"]
@@ -207,6 +211,8 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             if device.processing and not device.interrupted.is_set():
                 log.info(f"PTT  interrupt from {device.hostname}")
                 device.interrupted.set()
+            if bridge is not None and not device.ptt_buffer:
+                device.bridge_capture_ref = bridge.capture_ref(device)
             device.ptt_buffer.append(pcm)
         else:
             # VOX: run VAD
@@ -214,7 +220,10 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             # A delayed wake result may replay a complete command. Retain the
             # first completed utterance even if it ends before the final frame.
             for buffered in frames:
+                was_capturing = device.vad.recording
                 utterance = device.vad.process_frame(buffered)
+                if bridge is not None and not was_capturing and (device.vad.recording or utterance is not None):
+                    device.bridge_capture_ref = bridge.capture_ref(device)
                 if utterance is not None:
                     break
 
@@ -366,7 +375,7 @@ async def interruptible_sentences(device, text, extra_context):
 
 
 async def process_utterances(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue,
-                             pilot: VoicePilot | None = None):
+                             pilot: VoicePilot | None = None, bridge=None):
     """Process complete utterances: ASR -> Conversation -> TTS -> Opus -> TCP."""
     tcp_port = config["network"]["tcp_port"]
     dev_cfg = config["device"]
@@ -374,9 +383,11 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
     pilot = pilot if pilot is not None else VoicePilot(config.get("voice_pilot", {}))
 
     while True:
-        device, audio_int16 = await utterance_queue.get()
+        entry = await utterance_queue.get()
+        device, audio_int16 = entry[:2]
+        bridge_ref = entry[2] if len(entry) == 3 else None
         device.queued_utterances = max(0, getattr(device, "queued_utterances", 0) - 1)
-        if getattr(device, "pilot_speaking", False):
+        if getattr(device, "pilot_speaking", False) or getattr(device, "bridge_speaking", False):
             # The prompt task owns capture/processing until its final cleanup.
             utterance_queue.task_done()
             continue
@@ -421,6 +432,9 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             # Check for interrupt before LLM
             if device.interrupted.is_set():
                 log.info(f"Interrupted before LLM")
+                continue
+
+            if bridge is not None and await bridge.intercept(device, text, bridge_ref):
                 continue
 
             pilot_line = pilot.intercept(device.hostname, text)
@@ -629,7 +643,7 @@ class ColorFormatter(logging.Formatter):
         return f"{self.GREY}{ts}{self.RESET}  {color}{msg}{self.RESET}"
 
 
-async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot | None = None):
+async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot | None = None, bridge=None):
     """Tiny HTTP endpoint for runtime device management."""
     port = config.get("network", {}).get("control_port", 3002)
     pilot = pilot if pilot is not None else VoicePilot(config.get("voice_pilot", {}))
@@ -657,14 +671,22 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
                 k, _, v = line.decode().partition(":")
                 headers[k.strip().lower()] = v.strip()
 
+            target = urlsplit(path)
             body = b""
             if cl := int(headers.get("content-length", 0)):
-                if cl < 0 or cl > 4096:
+                if cl < 0 or cl > (32768 if target.path == "/bridge" else 4096):
                     return
                 body = await asyncio.wait_for(reader.readexactly(cl), timeout=5)
 
-            target = urlsplit(path)
-            if target.path == "/pilot/question":
+            if target.path == "/bridge":
+                if closing or bridge is None or not bridge.enabled:
+                    raise BridgeError(404, "Bridge is unavailable")
+                if method != "POST" or target.query:
+                    raise BridgeError(400, "Invalid bridge request")
+                result = bridge.dispatch(json.loads(body))
+                _http_respond(writer, 200, json.dumps(result))
+
+            elif target.path == "/pilot/question":
                 if closing or not pilot.enabled:
                     raise PilotError(404, "Voice pilot is unavailable")
                 if method == "POST" and not target.query:
@@ -731,7 +753,7 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
                 _http_respond(writer, 404, "not found")
 
             await writer.drain()
-        except PilotError as exc:
+        except (PilotError, BridgeError) as exc:
             _http_respond(writer, exc.status, json.dumps({"error": str(exc)}))
             await writer.drain()
         except (ValueError, KeyError) as e:
@@ -901,13 +923,15 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
 
     utterance_queue = asyncio.Queue()
     pilot = VoicePilot(config.get("voice_pilot", {}))
+    bridge = BridgeRuntime(config, manager)
+    bridge.start()
 
     _log_startup_summary(config)
     tasks = [asyncio.create_task(coro) for coro in (
-        udp_listener(config, manager, utterance_queue),
+        udp_listener(config, manager, utterance_queue, bridge),
         multicast_listener(config, manager),
-        process_utterances(config, manager, utterance_queue, pilot),
-        control_server(config, manager, pilot),
+        process_utterances(config, manager, utterance_queue, pilot, bridge),
+        control_server(config, manager, pilot, bridge),
         maintain_wake_audio(config, manager),
     )]
     try:
@@ -916,6 +940,7 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await bridge.close()
         for device in list(manager.devices.values()):
             gate = device.wake_gate
             if gate is not None and hasattr(gate, 'aclose'):

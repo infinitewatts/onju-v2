@@ -5,22 +5,34 @@ import struct
 log = logging.getLogger(__name__)
 
 
-async def send_tcp(ip: str, port: int, header: bytes, data: bytes | None = None, timeout: float = 5):
+async def send_tcp(ip: str, port: int, header: bytes, data: bytes | None = None,
+                   timeout: float = 5, may_send=None):
+    writer = None
     try:
-        reader, writer = await asyncio.wait_for(
+        _, writer = await asyncio.wait_for(
             asyncio.open_connection(ip, port), timeout=timeout
         )
+        # State may have changed while TCP connected. No suspension separates
+        # this final guard from the first protocol write.
+        if may_send is not None and not may_send():
+            return False
         writer.write(header)
         if data:
             writer.write(data)
-        await writer.drain()
-        writer.close()
-        await writer.wait_closed()
+        await asyncio.wait_for(writer.drain(), timeout=timeout)
+        return True
     except (asyncio.TimeoutError, ConnectionError, OSError):
-        pass  # non-critical, device may be busy
+        return False  # non-critical, device may be busy
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1)
+            except (asyncio.TimeoutError, ConnectionError, OSError):
+                pass
 
 
-async def send_audio(ip: str, port: int, opus_payload: bytes, mic_timeout: int = 60, volume: int = 14, fade: int = 6):
+async def send_audio(ip: str, port: int, opus_payload: bytes, mic_timeout: int = 60, volume: int = 14, fade: int = 6, may_send=None):
     volume = max(0, min(16, int(volume)))
     # header[0]   0xAA for audio
     # header[1:2] mic timeout in seconds (big-endian)
@@ -42,7 +54,7 @@ async def send_audio(ip: str, port: int, opus_payload: bytes, mic_timeout: int =
     payload = opus_payload or b"\x00\x00"
     if mic_timeout < 20:
         payload += bytes([0xDD, (mic_timeout >> 8) & 0xFF, mic_timeout & 0xFF, 0, 0, 0])
-    await send_tcp(ip, port, header, payload)
+    return await send_tcp(ip, port, header, payload, may_send=may_send)
 
 
 async def send_led_blink(ip: str, port: int, intensity: int, r: int = 255, g: int = 255, b: int = 255, fade: int = 6):
