@@ -35,6 +35,10 @@ class Device:
         self.ptt_buffer: list = []  # raw PCM frames during PTT
         self.processing = False     # True while ASR/LLM/TTS pipeline is running
         self.interrupted = asyncio.Event()
+        self.wake_gate = None
+        if config.get("wake_word", {}).get("enabled") and not ptt:
+            from pipeline.wakeword import WakeWordGate
+            self.wake_gate = WakeWordGate(config["wake_word"])
 
     def to_dict(self) -> dict:
         return {

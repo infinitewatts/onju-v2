@@ -116,6 +116,16 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
   message restores the microphone timeout. Interrupting closes the upstream
   response; the gateway terminates/reaps the interrupted CLI process and does
   not retry a turn that might already have queued a task.
+- **Hands-free activation:** the Mini config enables a local Sherpa-ONNX
+  detector for "Hey Aiden". The speaker streams microphone audio over the
+  trusted LAN to the Mini; only a small rolling memory buffer is retained
+  before activation, and ambient speech does not enter transcription or Claude.
+  Each activation admits one question (up to 30 seconds); a wake phrase spoken
+  alone opens a ten-second command window. After answering, another wake phrase
+  is required. The physical mute switch and double-tap disable still apply.
+  This is keyword detection, not speaker authentication; anyone nearby can wake
+  it, and false activations remain possible. Voice interruption while the
+  speaker is playing is limited by its firmware, which suppresses its mic then.
 - **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
   the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
   the board summary, and queue a task. There is no Bash, no file access, and none
@@ -132,9 +142,12 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
 
 Install or refresh (after a merge to master):
 ```sh
-# Mini
+# Mini (one-time preparation before enabling wake_word)
+uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword
+.venv/bin/python scripts/install_wakeword.py
+# Mini refresh
 ssh macmini 'cd ~/onju-v2-live && git fetch -q && git checkout -q --detach origin/master \
-  && uv sync --python 3.13 --extra asr --extra tts-local && deploy/macmini/install.sh'
+  && uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword && deploy/macmini/install.sh'
 # MacBook (board host), from a master checkout
 deploy/macbook/install-board-sync.sh
 ```

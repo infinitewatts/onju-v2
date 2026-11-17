@@ -1,3 +1,10 @@
+wake_word:
+  enabled: false
+  model_dir: "data/wakeword"                 # run scripts/install_wakeword.py first
+  command_window_s: 30
+  pre_buffer_s: 1.5
+  threshold: 0.25
+
 asr:
   url: "http://localhost:8100"               # parakeet-asr-server
 

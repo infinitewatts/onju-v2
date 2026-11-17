@@ -35,6 +35,13 @@ vad:
   silence_time: 1.5
   pre_buffer_s: 1.0
 
+wake_word:
+  enabled: true
+  model_dir: "data/wakeword"
+  command_window_s: 30
+  pre_buffer_s: 1.5
+  threshold: 0.25
+
 network:
   allowed_devices:
     onju-8DAB80: "192.168.86.228"

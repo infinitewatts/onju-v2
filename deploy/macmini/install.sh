@@ -6,6 +6,19 @@ set -euo pipefail
 REPO="${0:A:h:h:h}"
 LA="$HOME/Library/LaunchAgents"
 PY="$REPO/.venv/bin/python"
+# Fail before replacing config or restarting any job if wake assets are missing.
+"$PY" - "$REPO" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+root = Path(sys.argv[1])
+sys.path.insert(0, str(root))
+cfg = yaml.safe_load((root / "deploy/macmini/config.yaml").read_text()).get("wake_word", {})
+if cfg.get("enabled"):
+    from pipeline.wakeword import WakeWordGate
+    cfg["model_dir"] = str(root / cfg["model_dir"])
+    WakeWordGate(cfg)
+PY
 mkdir -p "$REPO/logs" "$REPO/data" "$LA"
 cp "$REPO/deploy/macmini/config.yaml" "$REPO/pipeline/config.yaml"
 

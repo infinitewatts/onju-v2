@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
 import time
 import warnings
@@ -18,7 +19,7 @@ from pipeline.audio import decode_ulaw, opus_encode, opus_frames_to_tcp_payload,
 from pipeline.conversation import create_backend, sentence_chunks
 from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
-from pipeline.protocol import send_audio, send_led_blink, open_led_connection, write_led_blink, close_led_connection
+from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
 from pipeline.services import asr, tts
 
 log = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
                     was_recording[hostname] = False
                     audio = np.concatenate(dev.vad.buffer) if dev.vad.buffer else None
                     dev.vad.reset()
+                    gate = getattr(dev, "wake_gate", None)
+                    if gate is not None:
+                        gate.reset()
                     if audio is not None and len(audio) > min_utterance_samples:
                         log.info(f"VAD  timeout from {hostname} ({len(audio)/sample_rate:.1f}s)")
                         await utterance_queue.put((dev, audio))
@@ -89,10 +93,38 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
         device = manager.get_by_ip(addr[0])
         if device is None:
             continue
+        if len(data) != chunk_bytes:
+            continue
 
         now = time.time()
         last_packet_time[device.hostname] = now
         pcm = decode_ulaw(data)
+
+        wake_gate = getattr(device, "wake_gate", None)
+        if wake_gate is not None:
+            # Ambient audio stays in the small local keyword detector. It must
+            # never enter VAD/ASR/the paid agent before a wake activation.
+            if device.processing:
+                continue
+            frames = wake_gate.feed(pcm, time.monotonic())
+            if not frames:
+                device.vad.reset()
+                device.vad.pre_buffer.clear()
+                if device.vad_writer is not None:
+                    await close_led_connection(device.vad_writer)
+                    device.vad_writer = None
+                was_recording[device.hostname] = False
+                continue
+            if wake_gate.just_activated:
+                device.vad.reset()
+                device.vad.pre_buffer.clear()
+                log.info("WAKE detected for %s", device.hostname)
+                await send_led_blink(device.ip, tcp_port, 160, r=0, g=180, b=255)
+            # Replay the bounded wake prebuffer into VAD so a question spoken
+            # immediately after the name is not clipped by detector latency.
+            for buffered in frames[:-1]:
+                device.vad.process_frame(buffered)
+            pcm = frames[-1]
 
         if device.ptt:
             # PTT frames arriving while we're still responding means the user
@@ -134,6 +166,8 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             was_recording[device.hostname] = curr_recording
 
             if utterance is not None:
+                if wake_gate is not None:
+                    wake_gate.reset()
                 # Close persistent LED connection before queuing utterance
                 if device.vad_writer is not None:
                     await close_led_connection(device.vad_writer)
@@ -141,6 +175,23 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
                 was_recording[device.hostname] = False
                 log.info(f"VAD  utterance from {device.hostname} ({len(utterance)/sample_rate:.1f}s)")
                 await utterance_queue.put((device, utterance))
+
+
+async def maintain_wake_audio(config: dict, manager: DeviceManager):
+    """Renew local audio delivery; physical mute/disable still gate the board.
+
+    A 60-second lease expires if this pipeline stops. It does not authorize any
+    speech turn: WakeWordGate alone admits audio to transcription.
+    """
+    while True:
+        for device in list(manager.devices.values()):
+            gate = getattr(device, "wake_gate", None)
+            # Renew even while a command window is active: if audio stops
+            # (mute/Wi-Fi gap), feed() cannot expire that window until delivery
+            # resumes. The local gate still independently controls admission.
+            if gate is not None and not device.processing:
+                await send_stop_listening(device.ip, config["network"]["tcp_port"], hold_s=60)
+        await asyncio.sleep(20)
 
 
 async def greet_device(device: Device, config: dict):
@@ -239,6 +290,8 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
 
         device.processing = True
         device.interrupted.clear()
+        wake_gate = getattr(device, "wake_gate", None)
+        wake_only = False
 
         try:
             # Safety: close any lingering LED connection before processing
@@ -254,6 +307,14 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                 log.error(f"ASR  failed ({config['asr']['url']}): {e}")
                 continue
             text = asr_result.get("text", "").strip()
+            if wake_gate is not None:
+                text = re.sub(r"^\s*(?:hey[\s,]+)?aiden\b[\s,.!?;:-]*", "", text,
+                              flags=re.IGNORECASE).strip()
+                if not text and asr_result.get("text", "").strip():
+                    # A separate wake phrase opens one short local command
+                    # window. Do not spend an agent turn answering the name.
+                    wake_gate.arm(time.monotonic(), window_s=10)
+                    wake_only = True
             nsp = asr_result.get("no_speech_prob")
 
             if not text or (nsp is not None and nsp > no_speech_threshold):
@@ -437,6 +498,8 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     pass
         finally:
             device.processing = False
+            if wake_gate is not None and not wake_only:
+                wake_gate.reset()
             utterance_queue.task_done()
 
 
@@ -658,6 +721,8 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
         hostname, ip, ptt = _parse_device_arg(entry)
         device = manager.create_device(hostname, ip, ptt=ptt)
         log.info(f"DEVICE  {hostname} ({ip}) {'PTT' if ptt else 'VOX'} (startup)")
+        if device.wake_gate is not None:
+            log.info("WAKE ready: local Hey Aiden detector for %s", hostname)
         startup_greets.append(greet_device(device, config))
     if startup_greets:
         await asyncio.gather(*startup_greets)
@@ -673,6 +738,7 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
         multicast_listener(config, manager),
         process_utterances(config, manager, utterance_queue),
         control_server(config, manager),
+        maintain_wake_audio(config, manager),
     )
 
 
