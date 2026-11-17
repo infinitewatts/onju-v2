@@ -24,8 +24,10 @@ import signal
 import time
 import uuid
 from contextlib import aclosing
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
+from zoneinfo import ZoneInfo
 
 import anyio
 
@@ -104,6 +106,17 @@ class SessionStore:
         self._save()
 
 
+def clock_context(now: datetime | None = None) -> str:
+    local = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/Chicago"))
+    return (
+        "Current clock reading for this turn (America/Chicago): "
+        + local.strftime("%A, %B %d, %Y, %I:%M %p %Z (UTC%z).")
+        + " Use this fresh reading for today's date and current time, including"
+        " in resumed conversations. You have a clock reading; no web lookup is"
+        " needed. Only mention it when relevant to the user's question."
+    )
+
+
 def build_command(s: Settings, sid: str, new: bool, stream: bool = False) -> list[str]:
     """The spoken text goes on stdin, never argv: no option parsing, not in ps."""
     cmd = [
@@ -115,7 +128,7 @@ def build_command(s: Settings, sid: str, new: bool, stream: bool = False) -> lis
         "--tools", s.builtin_tools,
         "--permission-mode", "dontAsk",
         "--strict-mcp-config",
-        "--system-prompt", s.policy,
+        "--system-prompt", s.policy + "\n\n" + clock_context(),
         "--max-budget-usd", str(s.max_budget_usd),
     ]
     if stream:

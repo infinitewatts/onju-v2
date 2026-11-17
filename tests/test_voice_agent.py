@@ -5,7 +5,9 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -38,6 +40,21 @@ def settings(tmp: Path, claude_bin: str, **over) -> voice_agent.Settings:
 
 
 class CommandTests(unittest.TestCase):
+    def test_clock_uses_central_date_across_utc_midnight_and_dst(self):
+        winter = voice_agent.clock_context(datetime(2026, 11, 18, 2, 5, tzinfo=timezone.utc))
+        self.assertIn("Tuesday, November 17, 2026, 08:05 PM CST (UTC-0600)", winter)
+        summer = voice_agent.clock_context(datetime(2026, 7, 2, 2, 5, tzinfo=timezone.utc))
+        self.assertIn("Wednesday, July 01, 2026, 09:05 PM CDT (UTC-0500)", summer)
+
+    def test_clock_is_refreshed_for_new_and_resumed_streaming_turns(self):
+        with tempfile.TemporaryDirectory() as d:
+            s = settings(Path(d), "claude")
+            with patch.object(voice_agent, "clock_context", side_effect=["clock one", "clock two"]):
+                first = voice_agent.build_command(s, "sid", new=True)
+                resumed = voice_agent.build_command(s, "sid", new=False, stream=True)
+        self.assertEqual(first[first.index("--system-prompt") + 1], s.policy + "\n\nclock one")
+        self.assertEqual(resumed[resumed.index("--system-prompt") + 1], s.policy + "\n\nclock two")
+
     def test_locked_down_flags(self):
         with tempfile.TemporaryDirectory() as d:
             s = settings(Path(d), "claude")
