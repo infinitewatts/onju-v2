@@ -2,6 +2,8 @@ import asyncio
 import logging
 import time
 
+import numpy as np
+
 from pipeline.conversation import ConversationBackend, create_backend
 from pipeline.vad import VAD
 from pipeline.security import validate_device
@@ -35,10 +37,21 @@ class Device:
         self.ptt_buffer: list = []  # raw PCM frames during PTT
         self.processing = False     # True while ASR/LLM/TTS pipeline is running
         self.interrupted = asyncio.Event()
+        self.audio_frames = 0
+        self.last_audio_at = None
+        self.audio_rms = 0.0
+        self.peak_audio_rms = 0.0
         self.wake_gate = None
         if config.get("wake_word", {}).get("enabled") and not ptt:
             from pipeline.wakeword import WakeWordGate
             self.wake_gate = WakeWordGate(config["wake_word"])
+
+    def observe_audio(self, pcm):
+        """Keep level/counter metadata only, never microphone samples or text."""
+        self.audio_frames += 1
+        self.last_audio_at = time.monotonic()
+        self.audio_rms = float(np.sqrt(np.mean(np.square(pcm.astype(np.float32)))))
+        self.peak_audio_rms = max(self.peak_audio_rms, self.audio_rms)
 
     def to_dict(self) -> dict:
         return {
@@ -46,6 +59,17 @@ class Device:
             "ip": self.ip,
             "voice": self.voice,
             "ptt": self.ptt,
+            "listening": {
+                "processing": self.processing,
+                "queued_utterances": getattr(self, "queued_utterances", 0),
+                "wake_enabled": self.wake_gate is not None,
+                "wake_active": bool(self.wake_gate and self.wake_gate.active),
+                "audio_frames": self.audio_frames,
+                "last_audio_age_s": (round(max(0, time.monotonic() - self.last_audio_at), 2)
+                                     if self.last_audio_at is not None else None),
+                "audio_rms": round(self.audio_rms, 1),
+                "peak_audio_rms": round(self.peak_audio_rms, 1),
+            },
         }
 
     def __repr__(self):

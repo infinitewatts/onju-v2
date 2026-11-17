@@ -40,6 +40,7 @@ class WakeIntegrationTests(unittest.IsolatedAsyncioTestCase):
             vad=Mock(pre_buffer=deque(), speech_prob=0, recording=False),
             conversation=SimpleNamespace(stream=Mock(), commit=Mock()),
             last_user_text=None, last_response=None,
+            observe_audio=Mock(),
         )
 
     async def test_ambient_never_enters_vad_or_utterance_queue(self):
