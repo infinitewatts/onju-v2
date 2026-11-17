@@ -445,3 +445,13 @@ Both firmware targets support serial commands at 115200 baud:
 ## License
 
 MIT
+
+### Orchestrator question bridge
+
+The optional bridge connects one pinned Claude Desktop Code conversation to
+Aiden. It defaults off; the prepared Claude adapter defaults to observe-only.
+Structured questions use a bounded voice-first hook, then fall back to Claude's
+normal question UI on timeout or “on screen.” Ordinary questions use explicit
+MCP tools. Answers are unverified proposals with correlated delivery receipts,
+not authority to perform sensitive actions. See
+[setup, limitations, validation, and recovery](docs/orchestrator-bridge.md).
