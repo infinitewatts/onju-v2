@@ -177,10 +177,11 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
         pcm = decode_ulaw(data)
         device.observe_audio(pcm)
 
+        frames = [pcm]
         wake_gate = getattr(device, "wake_gate", None)
         if wake_gate is not None:
-            # Ambient audio stays in the small local keyword detector. It must
-            # never enter VAD/ASR/the paid agent before a wake activation.
+            # Idle audio stays in the configured local wake backend. Only an
+            # admitted command enters this VAD, transcript logging, or the agent.
             if device.processing:
                 continue
             frames = wake_gate.feed(pcm, time.monotonic())
@@ -197,11 +198,6 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
                 device.vad.pre_buffer.clear()
                 log.info("WAKE detected for %s", device.hostname)
                 await send_led_blink(device.ip, tcp_port, 160, r=0, g=180, b=255)
-            # Replay the bounded wake prebuffer into VAD so a question spoken
-            # immediately after the name is not clipped by detector latency.
-            for buffered in frames[:-1]:
-                device.vad.process_frame(buffered)
-            pcm = frames[-1]
 
         if device.ptt:
             # PTT frames arriving while we're still responding means the user
@@ -214,7 +210,13 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             device.ptt_buffer.append(pcm)
         else:
             # VOX: run VAD
-            utterance = device.vad.process_frame(pcm)
+            utterance = None
+            # A delayed wake result may replay a complete command. Retain the
+            # first completed utterance even if it ends before the final frame.
+            for buffered in frames:
+                utterance = device.vad.process_frame(buffered)
+                if utterance is not None:
+                    break
 
             # Interrupt only on actual speech (not background noise)
             if device.processing:
@@ -227,6 +229,8 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             curr_recording = device.vad.recording
 
             if curr_recording and not prev_recording:
+                if getattr(wake_gate, 'model_profile', None) == 'local_asr':
+                    wake_gate.begin_command(time.monotonic())
                 # VAD just started recording — open persistent TCP for LED blinks
                 device.vad_writer = await open_led_connection(device.ip, tcp_port)
 
@@ -263,7 +267,7 @@ async def maintain_wake_audio(config: dict, manager: DeviceManager):
     """Renew local audio delivery; physical mute/disable still gate the board.
 
     A 60-second lease expires if this pipeline stops. It does not authorize any
-    speech turn: WakeWordGate alone admits audio to transcription.
+    speech turn: the configured wake gate alone admits audio to the command pipeline.
     """
     while True:
         for device in list(manager.devices.values()):
@@ -714,7 +718,10 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
                 payload = json.loads(body)
                 hostname = payload.get("hostname")
                 if hostname and hostname in manager.devices:
-                    del manager.devices[hostname]
+                    removed = manager.devices.pop(hostname)
+                    gate = getattr(removed, 'wake_gate', None)
+                    if gate is not None and hasattr(gate, 'aclose'):
+                        await gate.aclose()
                     log.info(f"DEVICE  {hostname} removed (control)")
                     _http_respond(writer, 200, json.dumps({"removed": hostname}))
                 else:
@@ -896,13 +903,23 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
     pilot = VoicePilot(config.get("voice_pilot", {}))
 
     _log_startup_summary(config)
-    await asyncio.gather(
+    tasks = [asyncio.create_task(coro) for coro in (
         udp_listener(config, manager, utterance_queue),
         multicast_listener(config, manager),
         process_utterances(config, manager, utterance_queue, pilot),
         control_server(config, manager, pilot),
         maintain_wake_audio(config, manager),
-    )
+    )]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for device in list(manager.devices.values()):
+            gate = device.wake_gate
+            if gate is not None and hasattr(gate, 'aclose'):
+                await gate.aclose()
 
 
 if __name__ == "__main__":

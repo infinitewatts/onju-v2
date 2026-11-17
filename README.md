@@ -119,20 +119,22 @@ These diagnostics retain neither microphone samples nor recognized speech.
   message restores the microphone timeout. Interrupting closes the upstream
   response; the gateway terminates/reaps the interrupted CLI process and does
   not retry a turn that might already have queued a task.
-- **Hands-free activation:** the Mini config enables a local Sherpa-ONNX
-  detector for "Hey Aiden". The speaker streams microphone audio over the
-  trusted LAN to the Mini; only a small rolling memory buffer is retained
-  before activation, and ambient speech does not enter transcription or Claude.
-  Each activation admits one question (up to 30 seconds); a wake phrase spoken
-  alone opens a ten-second command window. After answering, another wake phrase
-  is required. The physical mute switch and double-tap disable still apply.
-  This is keyword detection, not speaker authentication; anyone nearby can wake
-  it, and false activations remain possible. Voice interruption while the
-  speaker is playing is limited by its firmware, which suppresses its mic then.
-  The Mini uses the English GigaSpeech model with two decoder states offset by
-  half an encoder chunk, sharing one model and one command window. This reduces
-  misses caused by audio-block alignment; it is still not speaker authentication.
-  Legacy configs without `wake_word.model_profile` keep the bilingual model.
+- **Hands-free activation:** the Mini uses its existing local Parakeet speech
+  recognizer to check bounded speech segments for an exact leading "Hey Aiden".
+  Idle speech never reaches the paid agent, conversation history or transcript
+  logs. Recognition runs only on a literal loopback endpoint with proxies and
+  redirects disabled. The local ASR service uses temporary audio files which it
+  deletes after each request. Speech buffers and outstanding requests are bounded;
+  failures, timeouts and overflow leave the wake gate closed.
+  Say "Hey Aiden", wait for the blue light, then ask your question within ten
+  seconds; saying the name and question together also works. The gate closes
+  after one command, with a maximum 30-second capture once speech starts.
+  Physical mute still stops microphone delivery.
+  This recognizes a phrase, not a particular person: anyone nearby can activate
+  it. The firmware suppresses its microphone during speaker playback.
+  `wake_word.backend: local_asr` selects this mode; omitted backend retains the
+  existing keyword model. The English keyword profile remains available for
+  rollback. Local recognition uses more Mini processing than keyword spotting.
 - **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
   the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
   the board summary, and queue a task. There is no Bash, no file access, and none
@@ -161,7 +163,8 @@ Install or refresh (after a merge to master):
 ```sh
 # Mini (one-time preparation before enabling wake_word)
 uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword
-.venv/bin/python scripts/install_wakeword.py --profile english
+# Optional: install keyword-backend assets only when selecting that backend.
+# .venv/bin/python scripts/install_wakeword.py --profile english
 # Mini refresh
 ssh macmini 'cd ~/onju-v2-live && git fetch -q && git checkout -q --detach origin/master \
   && uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword && deploy/macmini/install.sh'

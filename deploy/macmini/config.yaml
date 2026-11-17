@@ -37,6 +37,7 @@ vad:
 
 wake_word:
   enabled: true
+  backend: "local_asr"
   model_profile: "english"
   model_dir: "data/wakeword-english"
   command_window_s: 30
