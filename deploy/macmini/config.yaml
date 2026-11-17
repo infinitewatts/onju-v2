@@ -52,7 +52,7 @@ audio:
   opus_frame_size: 320
 
 device:
-  default_volume: 15
+  default_volume: 16
   default_mic_timeout: 60
   led_fade: 2
   led_power: 50

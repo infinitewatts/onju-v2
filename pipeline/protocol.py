@@ -35,7 +35,14 @@ async def send_audio(ip: str, port: int, opus_payload: bytes, mic_timeout: int =
         fade,
         2,  # Opus
     ])
-    await send_tcp(ip, port, header, opus_payload)
+    # Onju floors the audio header's timeout at 20 seconds. Follow the Opus
+    # terminator with its explicit timeout command on the SAME TCP connection,
+    # so zero really stops listening and shorter follow-up windows are honored
+    # only after playback, without a separate connection racing the audio.
+    payload = opus_payload or b"\x00\x00"
+    if mic_timeout < 20:
+        payload += bytes([0xDD, (mic_timeout >> 8) & 0xFF, mic_timeout & 0xFF, 0, 0, 0])
+    await send_tcp(ip, port, header, payload)
 
 
 async def send_led_blink(ip: str, port: int, intensity: int, r: int = 255, g: int = 255, b: int = 255, fade: int = 6):
