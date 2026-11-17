@@ -13,11 +13,19 @@ from pathlib import Path
 import yaml
 root = Path(sys.argv[1])
 sys.path.insert(0, str(root))
-cfg = yaml.safe_load((root / "deploy/macmini/config.yaml").read_text()).get("wake_word", {})
+config = yaml.safe_load((root / "deploy/macmini/config.yaml").read_text())
+cfg = config.get("wake_word", {})
 if cfg.get("enabled"):
-    from pipeline.wakeword import WakeWordGate
-    cfg["model_dir"] = str(root / cfg["model_dir"])
-    WakeWordGate(cfg)
+    backend = cfg.get('backend', 'keyword')
+    if backend == 'local_asr':
+        from pipeline.local_wake import LocalSpeechWakeGate
+        LocalSpeechWakeGate(config)
+    elif backend == 'keyword':
+        from pipeline.wakeword import WakeWordGate
+        cfg["model_dir"] = str(root / cfg["model_dir"])
+        WakeWordGate(cfg)
+    else:
+        raise ValueError('Unknown wake backend')
 PY
 mkdir -p "$REPO/logs" "$REPO/data" "$LA"
 cp "$REPO/deploy/macmini/config.yaml" "$REPO/pipeline/config.yaml"

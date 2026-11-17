@@ -43,8 +43,15 @@ class Device:
         self.peak_audio_rms = 0.0
         self.wake_gate = None
         if config.get("wake_word", {}).get("enabled") and not ptt:
-            from pipeline.wakeword import WakeWordGate
-            self.wake_gate = WakeWordGate(config["wake_word"])
+            backend = config['wake_word'].get('backend', 'keyword')
+            if backend == 'local_asr':
+                from pipeline.local_wake import LocalSpeechWakeGate
+                self.wake_gate = LocalSpeechWakeGate(config)
+            elif backend == 'keyword':
+                from pipeline.wakeword import WakeWordGate
+                self.wake_gate = WakeWordGate(config['wake_word'])
+            else:
+                raise ValueError('Unknown wake backend')
 
     def observe_audio(self, pcm):
         """Keep level/counter metadata only, never microphone samples or text."""
@@ -72,6 +79,8 @@ class Device:
                 "wake_frames": getattr(self.wake_gate, "frames_seen", None),
                 "wake_model_profile": getattr(self.wake_gate, "model_profile", None),
                 "wake_detections": getattr(self.wake_gate, "detections", None),
+                "wake_checks": getattr(self.wake_gate, "checks", None),
+                "wake_failures": getattr(self.wake_gate, "failures", None),
                 "wake_max_feed_gap_s": getattr(self.wake_gate, "max_feed_gap_s", None),
                 "wake_resets": getattr(self.wake_gate, "reset_counts", None),
             },

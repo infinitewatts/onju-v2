@@ -88,6 +88,24 @@ class WakeIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dev.wake_gate.arm.call_args.kwargs, {"window_s": 10})
         dev.wake_gate.reset.assert_not_called()
 
+    async def test_completed_command_in_middle_of_replay_is_not_lost(self):
+        dev = self.device()
+        frame = np.zeros(512, dtype=np.int16)
+        command = np.ones(16000, dtype=np.int16)
+        dev.wake_gate.feed.return_value = [frame] * 8
+        dev.vad.process_frame.side_effect = [None, None, command]
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        with patch('pipeline.main.socket.socket'), patch.object(loop, 'sock_recvfrom',
+                AsyncMock(side_effect=[(b'\xff' * 512, (dev.ip, 1234)), asyncio.CancelledError()])):
+            with self.assertRaises(asyncio.CancelledError):
+                await udp_listener(CONFIG, SimpleNamespace(get_by_ip=lambda ip: dev), queue)
+        self.assertEqual(queue.qsize(), 1)
+        queued_device, queued_audio = queue.get_nowait()
+        self.assertIs(queued_device, dev)
+        np.testing.assert_array_equal(queued_audio, command)
+        self.assertEqual(dev.vad.process_frame.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

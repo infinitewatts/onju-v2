@@ -209,6 +209,17 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
         self.fail("Pilot prompt did not release processing")
 
+    async def test_device_removal_awaits_local_wake_cleanup(self):
+        closed = asyncio.Event()
+        async def close():
+            await asyncio.sleep(0)
+            closed.set()
+        self.dev.wake_gate = SimpleNamespace(aclose=AsyncMock(side_effect=close))
+        code, result = await self.request('DELETE', '/devices', {'hostname': DEVICE})
+        self.assertEqual(code, 200)
+        self.assertTrue(closed.is_set())
+        self.assertNotIn(DEVICE, self.manager.devices)
+
     async def test_post_is_accepted_duplicate_never_replays_and_get_reports_state(self):
         code, status = await self.request("POST", payload=PAYLOAD)
         self.assertEqual((code, status["status"]), (202, "queued"))
