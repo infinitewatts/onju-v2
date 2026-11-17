@@ -175,6 +175,7 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
         now = time.time()
         last_packet_time[device.hostname] = now
         pcm = decode_ulaw(data)
+        device.observe_audio(pcm)
 
         wake_gate = getattr(device, "wake_gate", None)
         if wake_gate is not None:

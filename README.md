@@ -104,6 +104,9 @@ The Mac mini runs four LaunchAgents from a detached checkout of reviewed
 `origin/master` at `~/onju-v2-live`: ASR (`:8100`), TTS (`:8880`), the voice
 agent (`:18789`) and the pipeline. Everything is loopback except the device ports
 (UDP 3000, multicast 12345). The control port is 3012 because Firecrawl holds 3002.
+Its loopback `/devices` response includes listening-state counters, time since
+the last accepted audio frame, and current/peak PCM RMS levels since startup.
+These diagnostics retain neither microphone samples nor recognized speech.
 
 - **Brain:** `pipeline/services/voice_agent.py` is an OpenAI-compatible gateway.
   It answers each turn with headless `claude -p --bare`, resuming one session per

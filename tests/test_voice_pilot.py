@@ -35,6 +35,7 @@ def device():
         vad=SimpleNamespace(recording=False, reset=Mock(), pre_buffer=deque()),
         conversation=SimpleNamespace(stream=Mock(), commit=Mock()),
         last_user_text=None, last_response=None,
+        observe_audio=Mock(),
     )
 
 
