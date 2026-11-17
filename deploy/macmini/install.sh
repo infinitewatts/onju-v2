@@ -42,5 +42,6 @@ PLIST
 plist com.infinitewatts.onju-asr "$PY" -m pipeline.services.asr_server --host 127.0.0.1 --port 8100
 plist com.infinitewatts.onju-tts "$PY" -m mlx_audio.server --host 127.0.0.1 --port 8880
 plist com.infinitewatts.onju-agent /bin/zsh -f "$REPO/deploy/macmini/run-agent.sh"
-plist com.infinitewatts.onju-pipeline "$PY" -m pipeline.main
+# Devices come from network.allowed_devices in config.yaml; --warmup loads the TTS model before the first utterance.
+plist com.infinitewatts.onju-pipeline "$PY" -m pipeline.main --warmup
 launchctl list | grep com.infinitewatts.onju- || true

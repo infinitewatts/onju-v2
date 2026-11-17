@@ -602,6 +602,20 @@ def _parse_device_arg(entry: str) -> tuple[str, str, bool]:
     return hostname, ip, ptt
 
 
+def _configured_device_args(config: dict, manual: list[str] = None) -> list[str]:
+    """`NAME=IP` entries for network.allowed_devices not already given as --device.
+
+    The multicast announce is the only other way a device registers, and a pipeline
+    that restarted after the speaker's last announce never sees it. Registering the
+    allowed devices at startup means the speaker's audio is accepted right away.
+    Startup entries are voice-activated (VOX); a push-to-talk speaker must be
+    passed as --device NAME=IP:ptt, which takes precedence here.
+    """
+    seen = {_parse_device_arg(entry)[1] for entry in (manual or [])}
+    return [f"{name}={ip}" for name, ip in (config.get("network", {}).get("allowed_devices") or {}).items()
+            if ip not in seen]
+
+
 async def main(config_path: str = None, do_warmup: bool = False, devices: list[str] = None):
     config = load_config(config_path)
 
@@ -616,10 +630,10 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
     manager = DeviceManager(config)
 
     startup_greets = []
-    for entry in (devices or []):
+    for entry in list(devices or []) + _configured_device_args(config, devices):
         hostname, ip, ptt = _parse_device_arg(entry)
         device = manager.create_device(hostname, ip, ptt=ptt)
-        log.info(f"DEVICE  {hostname} ({ip}) {'PTT' if ptt else 'VOX'} (manual)")
+        log.info(f"DEVICE  {hostname} ({ip}) {'PTT' if ptt else 'VOX'} (startup)")
         startup_greets.append(greet_device(device, config))
     if startup_greets:
         await asyncio.gather(*startup_greets)
