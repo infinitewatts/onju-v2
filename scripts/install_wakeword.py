@@ -19,17 +19,32 @@ FILES = (
     "decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
     "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
 )
+ENGLISH_MODEL = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
+PROFILES = {
+    "bilingual": (MODEL, URL, SHA256, FILES),
+    "english": (
+        ENGLISH_MODEL,
+        f"https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/{ENGLISH_MODEL}.tar.bz2",
+        "f170013b4716e41b62b9bfd809687c207cef798ef9bc6534d524e17af9b6561a",
+        ("tokens.txt", "encoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+         "decoder-epoch-12-avg-2-chunk-16-left-64.onnx",
+         "joiner-epoch-12-avg-2-chunk-16-left-64.onnx"),
+    ),
+}
 
 
-def install(destination: Path):
-    with urllib.request.urlopen(URL, timeout=60) as response:
+def install(destination: Path, profile: str = "bilingual"):
+    if profile not in PROFILES:
+        raise ValueError("Unknown wake model profile")
+    model, url, checksum, files = PROFILES[profile]
+    with urllib.request.urlopen(url, timeout=60) as response:
         data = response.read(40_000_001)
-    if len(data) > 40_000_000 or hashlib.sha256(data).hexdigest() != SHA256:
+    if len(data) > 40_000_000 or hashlib.sha256(data).hexdigest() != checksum:
         raise ValueError("Wake model download failed size/checksum verification")
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:bz2") as archive:
         prepared = {}
-        for name in FILES:
-            member = archive.getmember(f"{MODEL}/{name}")
+        for name in files:
+            member = archive.getmember(f"{model}/{name}")
             if not member.isfile() or member.size > 15_000_000:
                 raise ValueError("Unexpected model archive member")
             with archive.extractfile(member) as source:
@@ -45,5 +60,8 @@ def install(destination: Path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--destination", type=Path, default=Path("data/wakeword"))
-    install(parser.parse_args().destination)
+    parser.add_argument("--profile", choices=tuple(PROFILES), default="bilingual")
+    parser.add_argument("--destination", type=Path)
+    args = parser.parse_args()
+    destination = args.destination or Path("data/wakeword-english" if args.profile == "english" else "data/wakeword")
+    install(destination, args.profile)

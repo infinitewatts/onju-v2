@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from pipeline.wakeword import KEYWORD, KEYWORD_PHONES, SAMPLE_RATE, WakeWordGate
+from pipeline.wakeword import (ENGLISH_KEYWORD, KEYWORD, KEYWORD_PHONES,
+                               SAMPLE_RATE, WakeWordGate, _PhaseDetector)
 
 WAKE = 20000
 
@@ -206,6 +207,32 @@ class ModelLoadingTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 WakeWordGate({"model_dir": directory})
 
+    def test_english_profile_uses_fixed_bpe_and_two_shared_model_states(self):
+        seen = {}
+        detector = FakeDetector()
+        def create(**kwargs):
+            seen.update(kwargs)
+            seen['keyword_contents'] = Path(kwargs['keywords_file']).read_text()
+            return detector
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ('tokens.txt', 'encoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+                         'decoder-epoch-12-avg-2-chunk-16-left-64.onnx',
+                         'joiner-epoch-12-avg-2-chunk-16-left-64.onnx'):
+                (Path(directory) / name).touch()
+            with patch.dict(sys.modules, {'sherpa_onnx': types.SimpleNamespace(KeywordSpotter=create)}):
+                gate = WakeWordGate({'model_dir': directory, 'model_profile': 'english'})
+        self.assertEqual(gate.model_profile, 'english')
+        self.assertEqual(seen['keywords_score'], 1)
+        self.assertEqual(seen['keyword_contents'], ENGLISH_KEYWORD)
+        self.assertEqual(len(detector.streams), 2)
+        self.assertEqual(detector.streams[0].accepted[0].size, 8000)
+        self.assertEqual(detector.streams[1].accepted[0].size, 5120)
+        self.assertEqual(detector.streams[1].accepted[1].size, 8000)
+
+    def test_unknown_profile_fails_closed(self):
+        with self.assertRaises(ValueError):
+            WakeWordGate({'model_dir': '.', 'model_profile': 'typo'})
+
     def test_model_constructor_uses_local_cpu_and_fixed_keyword(self):
         seen = {}
         def create(**kwargs):
@@ -236,6 +263,41 @@ class ModelLoadingTests(unittest.TestCase):
             with patch("builtins.__import__", side_effect=importing):
                 with self.assertRaises(ImportError):
                     WakeWordGate({"model_dir": directory})
+
+
+class PhaseStreamTests(unittest.TestCase):
+    def test_consuming_results_from_second_phase_open_one_window(self):
+        class ConsumingDetector(FakeDetector):
+            def get_result(self, stream):
+                result, stream.result = stream.result, ''
+                return result if self.streams.index(stream) % 2 else ''
+        detector = ConsumingDetector()
+        gate = WakeWordGate({'model_profile': 'english'}, detector=_PhaseDetector(detector))
+        output = gate.feed(frame(WAKE), 0)
+        self.assertTrue(gate.just_activated)
+        self.assertEqual(gate.detections, 1)
+        # Only actual microphone samples enter ASR, never either seed silence.
+        np.testing.assert_array_equal(np.concatenate(output), frame(WAKE))
+        gate.feed(frame(WAKE), .032)
+        self.assertEqual(gate.detections, 1)
+        self.assertFalse(gate.just_activated)
+        gate.reset()
+        self.assertEqual(len(detector.streams), 4)
+        self.assertEqual(detector.streams[3].accepted[0].size, 5120)
+        gate.feed(frame(WAKE), 1)
+        self.assertEqual(gate.detections, 2)
+
+    def test_ambient_gap_and_arm_recreate_both_phases_without_admitting_noise(self):
+        detector = FakeDetector()
+        gate = WakeWordGate({'model_profile': 'english'}, detector=_PhaseDetector(detector))
+        self.assertEqual(gate.feed(frame(), 0), [])
+        self.assertEqual(gate.feed(frame(), 2), [])
+        self.assertEqual(len(detector.streams), 4)
+        self.assertEqual(gate.reset_counts['gap'], 1)
+        gate.arm(3)
+        self.assertEqual(len(detector.streams), 6)
+        self.assertEqual(detector.streams[-1].accepted[0].size, 5120)
+        self.assertEqual(gate.detections, 0)
 
 
 if __name__ == "__main__":

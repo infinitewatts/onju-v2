@@ -15,6 +15,7 @@ SAMPLE_RATE = 16000
 FRAME_SAMPLES = 512
 KEYWORD = "HEY_AIDEN"
 KEYWORD_PHONES = "HH EY1 EY1 D AH0 N @HEY_AIDEN\n"
+ENGLISH_KEYWORD = "▁HE Y ▁A ID EN @HEY_AIDEN\n"
 _IDLE_STREAM_S = 60
 _IDLE_GAP_S = 1.0
 
@@ -28,11 +29,18 @@ def _positive(value: float, name: str, *, zero: bool = False) -> float:
 
 def _load_detector(config: dict):
     root = Path(config["model_dir"]).expanduser()
+    profile = config.get("model_profile", "bilingual")
+    if profile not in ("bilingual", "english"):
+        raise ValueError("Unknown wake model_profile")
+    english = profile == "english"
     files = {
         "tokens": root / "tokens.txt",
-        "encoder": root / "encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
-        "decoder": root / "decoder-epoch-13-avg-2-chunk-8-left-64.onnx",
-        "joiner": root / "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx",
+        "encoder": root / ("encoder-epoch-12-avg-2-chunk-16-left-64.onnx" if english
+                           else "encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx"),
+        "decoder": root / ("decoder-epoch-12-avg-2-chunk-16-left-64.onnx" if english
+                           else "decoder-epoch-13-avg-2-chunk-8-left-64.onnx"),
+        "joiner": root / ("joiner-epoch-12-avg-2-chunk-16-left-64.onnx" if english
+                          else "joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx"),
     }
     for model in files.values():
         if not model.is_file():
@@ -43,18 +51,58 @@ def _load_detector(config: dict):
 
     with tempfile.TemporaryDirectory(prefix="onju-wake-keyword-") as directory:
         keywords = Path(directory) / "keywords.txt"
-        keywords.write_text(KEYWORD_PHONES)
+        keywords.write_text(ENGLISH_KEYWORD if english else KEYWORD_PHONES)
         keywords.chmod(0o600)
-        return sherpa_onnx.KeywordSpotter(
+        detector = sherpa_onnx.KeywordSpotter(
             **{key: str(value) for key, value in files.items()},
             keywords_file=str(keywords),
-            keywords_score=2.0,
+            keywords_score=1.0 if english else 2.0,
             keywords_threshold=_positive(config.get("threshold", 0.25), "threshold"),
             provider="cpu",
             num_threads=1,
             sample_rate=SAMPLE_RATE,
             feature_dim=80,
         )
+        return _PhaseDetector(detector) if english else detector
+
+
+class _PhaseStreams:
+    def __init__(self, detector):
+        self.streams = [detector.create_stream(), detector.create_stream()]
+        # Half the English encoder's 640ms chunk. Different feature alignment
+        # avoids missing a word at one stream's chunk boundary. Seed silence
+        # stays inside the detector and never enters the command prebuffer.
+        self.streams[1].accept_waveform(SAMPLE_RATE, np.zeros(5120, dtype=np.float32))
+
+    def accept_waveform(self, rate, frame):
+        for stream in self.streams:
+            stream.accept_waveform(rate, frame)
+
+
+class _PhaseDetector:
+    """Two bounded decoder states share one model and one outer wake gate."""
+    def __init__(self, detector):
+        self.detector = detector
+
+    def create_stream(self):
+        return _PhaseStreams(self.detector)
+
+    def is_ready(self, streams):
+        return any(self.detector.is_ready(s) for s in streams.streams)
+
+    def decode_stream(self, streams):
+        for stream in streams.streams:
+            if self.detector.is_ready(stream):
+                self.detector.decode_stream(stream)
+
+    def get_result(self, streams):
+        for stream in streams.streams:
+            # The native getter consumes the result. Read each at most once;
+            # checking truthiness with a second call loses the activation.
+            result = self.detector.get_result(stream)
+            if result == KEYWORD:
+                return result
+        return ""
 
 
 class WakeWordGate:
@@ -66,6 +114,7 @@ class WakeWordGate:
     """
 
     def __init__(self, config: dict, detector=None):
+        self.model_profile = config.get("model_profile", "bilingual")
         self.command_window_s = _positive(config.get("command_window_s", 30),
                                           "command_window_s")
         self.pre_buffer_s = _positive(config.get("pre_buffer_s", 1.5),

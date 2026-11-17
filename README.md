@@ -129,6 +129,10 @@ These diagnostics retain neither microphone samples nor recognized speech.
   This is keyword detection, not speaker authentication; anyone nearby can wake
   it, and false activations remain possible. Voice interruption while the
   speaker is playing is limited by its firmware, which suppresses its mic then.
+  The Mini uses the English GigaSpeech model with two decoder states offset by
+  half an encoder chunk, sharing one model and one command window. This reduces
+  misses caused by audio-block alignment; it is still not speaker authentication.
+  Legacy configs without `wake_word.model_profile` keep the bilingual model.
 - **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
   the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
   the board summary, and queue a task. There is no Bash, no file access, and none
@@ -157,7 +161,7 @@ Install or refresh (after a merge to master):
 ```sh
 # Mini (one-time preparation before enabling wake_word)
 uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword
-.venv/bin/python scripts/install_wakeword.py
+.venv/bin/python scripts/install_wakeword.py --profile english
 # Mini refresh
 ssh macmini 'cd ~/onju-v2-live && git fetch -q && git checkout -q --detach origin/master \
   && uv sync --python 3.13 --extra asr --extra tts-local --extra wakeword && deploy/macmini/install.sh'

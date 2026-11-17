@@ -70,6 +70,7 @@ class Device:
                 "audio_rms": round(self.audio_rms, 1),
                 "peak_audio_rms": round(self.peak_audio_rms, 1),
                 "wake_frames": getattr(self.wake_gate, "frames_seen", None),
+                "wake_model_profile": getattr(self.wake_gate, "model_profile", None),
                 "wake_detections": getattr(self.wake_gate, "detections", None),
                 "wake_max_feed_gap_s": getattr(self.wake_gate, "max_feed_gap_s", None),
                 "wake_resets": getattr(self.wake_gate, "reset_counts", None),
