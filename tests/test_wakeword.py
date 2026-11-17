@@ -58,6 +58,17 @@ class GateTests(unittest.TestCase):
         self.detector = FakeDetector()
         self.gate = WakeWordGate({}, detector=self.detector)
 
+    def test_diagnostics_distinguish_feed_gaps_from_explicit_resets(self):
+        self.gate.feed(frame(), 0)
+        self.gate.feed(frame(), 2)
+        self.gate.feed(frame(WAKE), 2.032)
+        self.gate.reset()
+        self.assertEqual(self.gate.frames_seen, 3)
+        self.assertEqual(self.gate.detections, 1)
+        self.assertEqual(self.gate.max_feed_gap_s, 2)
+        self.assertEqual(self.gate.reset_counts['gap'], 1)
+        self.assertEqual(self.gate.reset_counts['explicit'], 2)
+
     def test_idle_ambient_audio_never_escapes(self):
         for i in range(400):
             self.assertEqual(self.gate.feed(frame(), i * .032), [])

@@ -77,6 +77,10 @@ class WakeWordGate:
         self._detector = detector if detector is not None else _load_detector(config)
         self._pre_buffer: deque[np.ndarray] = deque()
         self._buffered_samples = 0
+        self.frames_seen = 0
+        self.detections = 0
+        self.max_feed_gap_s = 0.0
+        self.reset_counts = {"explicit": 0, "clock": 0, "expiry": 0, "gap": 0, "interval": 0}
         self.reset()
 
     def _new_stream(self):
@@ -89,7 +93,8 @@ class WakeWordGate:
         while self._detector.is_ready(self._stream):
             self._detector.decode_stream(self._stream)
 
-    def reset(self):
+    def reset(self, reason="explicit"):
+        self.reset_counts[reason] += 1
         self.active = False
         self.just_activated = False
         self._deadline = None
@@ -128,16 +133,20 @@ class WakeWordGate:
         frame = np.asarray(pcm_int16)
         if frame.shape != (FRAME_SAMPLES,) or frame.dtype != np.int16:
             raise ValueError("Wake-word audio must be 512 samples of one-dimensional int16 PCM")
+        self.frames_seen += 1
+        if self._last_feed_at is not None:
+            self.max_feed_gap_s = max(self.max_feed_gap_s, now - self._last_feed_at)
         if self._last_feed_at is not None and now < self._last_feed_at:
-            self.reset()  # a backward clock cannot extend an authorization
+            self.reset("clock")  # a backward clock cannot extend an authorization
         if self.active and now >= self._deadline:
-            self.reset()
+            self.reset("expiry")
         if self.active:
             self._last_feed_at = now
             return [frame]
-        if (self._last_feed_at is not None and now - self._last_feed_at > _IDLE_GAP_S
-                or self._idle_samples >= _IDLE_STREAM_S * SAMPLE_RATE):
-            self.reset()
+        if self._last_feed_at is not None and now - self._last_feed_at > _IDLE_GAP_S:
+            self.reset("gap")
+        elif self._idle_samples >= _IDLE_STREAM_S * SAMPLE_RATE:
+            self.reset("interval")
         self._last_feed_at = now
         self._remember(frame)
         self._stream.accept_waveform(SAMPLE_RATE, frame.astype(np.float32) / 32768.0)
@@ -151,6 +160,7 @@ class WakeWordGate:
         if not detected:
             return []
         self.active = True
+        self.detections += 1
         self.just_activated = True
         self._deadline = now + self.command_window_s
         buffered = list(self._pre_buffer)
