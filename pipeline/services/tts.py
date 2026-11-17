@@ -5,12 +5,16 @@ import os
 import httpx
 from pydub import AudioSegment
 
+from pipeline.text_normalize import normalize_for_speech
+
 log = logging.getLogger(__name__)
 
 
 async def synthesize(text: str, voice: str, config: dict) -> bytes:
     """Convert text to 16kHz mono PCM bytes using the configured TTS backend."""
     backend = config["tts"]["backend"]
+    if config["tts"].get("normalize_text", True):
+        text = normalize_for_speech(text)
     if backend == "elevenlabs":
         return await _elevenlabs(text, voice, config)
     if backend == "local":
