@@ -3,9 +3,12 @@
 The small local TTS model garbles digits, clock times and acronyms. Everything here
 turns them into plain spoken words. Times written in UTC are read as Central time.
 """
+import logging
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+log = logging.getLogger(__name__)
 
 _ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
          "fifteen sixteen seventeen eighteen nineteen").split()
@@ -16,10 +19,10 @@ _ORDINAL_ENDINGS = {"one": "first", "two": "second", "three": "third", "five": "
 
 # Spoken forms. Spelled letter by letter where people say the letters.
 _ABBREVIATIONS = {
-    "CompSource": "Comp Source", "UTC": "", "CT": "Central time", "CST": "Central time", "CDT": "Central time",
+    "CompSource": "Comp Source", "UTC": "", "CST": "Central time", "CDT": "Central time",
     "SMS": "S M S", "PR": "P R", "FP": "F P", "QBO": "Q B O", "BWS": "B W S", "API": "A P I",
     "AHJ": "A H J", "kW": "kilowatts", "kWh": "kilowatt hours", "HVAC": "H vac",
-    "ID": "I D", "OK": "okay", "TTS": "T T S", "LLC": "L L C", "ASAP": "A S A P",
+    "ID": "I D", "TTS": "T T S", "LLC": "L L C", "ASAP": "A S A P",
 }
 
 
@@ -57,10 +60,16 @@ def _digits(text: str) -> str:
 
 def _money(match: re.Match) -> str:
     dollars = int(match.group(1).replace(",", ""))
-    cents = match.group(2)
+    frac = match.group(2)
+    scale = (match.group(3) or "").lower()
+    if scale in ("million", "billion", "thousand"):
+        amount = number_to_words(dollars) + (f" point {_digits(frac)}" if frac else "")
+        return f"{amount} {scale} dollars"
     out = number_to_words(dollars) + (" dollar" if dollars == 1 else " dollars")
-    if cents and int(cents):
-        out += " and " + number_to_words(int(cents)) + (" cent" if int(cents) == 1 else " cents")
+    if frac:
+        cents = int(frac.ljust(2, "0")[:2])
+        if cents:
+            out += " and " + number_to_words(cents) + (" cent" if cents == 1 else " cents")
     return out
 
 
@@ -79,7 +88,7 @@ def _utc_to_central(hour: int, minute: int, now: datetime) -> tuple[int, int]:
     return local.hour, local.minute
 
 
-def normalize_for_speech(text: str, now: datetime | None = None) -> str:
+def _normalize(text: str, now: datetime | None = None) -> str:
     now = now or datetime.now(ZoneInfo("America/Chicago"))
 
     def utc_time(m: re.Match) -> str:
@@ -94,15 +103,19 @@ def normalize_for_speech(text: str, now: datetime | None = None) -> str:
                   text)
     text = re.sub(r"\b([01]?\d|2[0-3]):([0-5]\d)\b", lambda m: _clock(int(m.group(1)), int(m.group(2))), text)
     # $4,278.60 and $20
-    text = re.sub(r"\$(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{2}))?", _money, text)
+    text = re.sub(r"\$(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?:\s+(million|billion|thousand))?\b", _money, text, flags=re.I)
     # 20th, 1st
     text = re.sub(r"\b(\d+)(?:st|nd|rd|th)\b", lambda m: _ordinal(int(m.group(1))), text)
     # 12.5 percent and 12.5%
     text = re.sub(r"\b(\d+)\.(\d+)\s*%", lambda m: f"{number_to_words(int(m.group(1)))} point {_digits(m.group(2))} percent", text)
     text = re.sub(r"\b(\d+)\s*%", lambda m: f"{number_to_words(int(m.group(1)))} percent", text)
-    # decimals and thousands separators
+    # thousands separators (with optional decimals), then plain decimals
+    text = re.sub(r"\b(\d{1,3}(?:,\d{3})+)(?:\.(\d+))?\b",
+                  lambda m: number_to_words(int(m.group(1).replace(",", ""))) + (f" point {_digits(m.group(2))}" if m.group(2) else ""), text)
     text = re.sub(r"\b(\d+)\.(\d+)\b", lambda m: f"{number_to_words(int(m.group(1)))} point {_digits(m.group(2))}", text)
-    text = re.sub(r"\b\d{1,3}(?:,\d{3})+\b", lambda m: number_to_words(int(m.group(0).replace(",", ""))), text)
+    # years 2010-2099 read as pairs; ranges 5-10 read with "to"
+    text = re.sub(r"\b20([1-9]\d)\b", lambda m: "twenty " + number_to_words(int(m.group(1))), text)
+    text = re.sub(r"\b(\d+)-(\d+)\b", lambda m: f"{m.group(1)} to {m.group(2)}", text)
     # long digit runs (ids, phone fragments) are read digit by digit; plain numbers as numbers
     text = re.sub(r"\b\d{7,}\b", lambda m: _digits(m.group(0)), text)
     text = re.sub(r"\b\d{1,6}\b", lambda m: number_to_words(int(m.group(0))), text)
@@ -110,3 +123,12 @@ def normalize_for_speech(text: str, now: datetime | None = None) -> str:
         text = re.sub(rf"(?<![A-Za-z]){re.escape(short)}(?![A-Za-z])", spoken, text)
     text = text.replace("&", " and ").replace("/", " slash ")
     return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def normalize_for_speech(text: str, now: datetime | None = None) -> str:
+    """Never raises: on any failure the original text is spoken as written."""
+    try:
+        return _normalize(text, now)
+    except Exception:  # e.g. int() limit on absurdly long digit strings
+        log.warning("text normalization failed; speaking the original text")
+        return text

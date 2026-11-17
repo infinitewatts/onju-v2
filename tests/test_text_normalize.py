@@ -40,5 +40,26 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(n(s, NOW), s)
 
 
+class FixTests(unittest.TestCase):
+    def test_money_with_scale_and_odd_decimals(self):
+        self.assertEqual(n("$1.5 million", NOW), "one point five million dollars")
+        self.assertEqual(n("$12.5", NOW), "twelve dollars and fifty cents")
+
+    def test_thousands_with_decimals(self):
+        self.assertEqual(n("4,278.60", NOW), "four thousand two hundred seventy-eight point six zero")
+
+    def test_state_and_current_transformer_are_untouched(self):
+        self.assertEqual(n("Oklahoma City, OK", NOW), "Oklahoma City, OK")
+        self.assertEqual(n("CT clamp", NOW), "CT clamp")
+
+    def test_years_and_ranges(self):
+        self.assertEqual(n("in 2026", NOW), "in twenty twenty-six")
+        self.assertEqual(n("5-10 panels", NOW), "five to ten panels")
+
+    def test_never_raises(self):
+        huge = "$" + "9" * 4400
+        self.assertEqual(n(huge, NOW), huge)
+
+
 if __name__ == "__main__":
     unittest.main()
