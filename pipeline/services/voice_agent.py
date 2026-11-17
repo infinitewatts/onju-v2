@@ -20,9 +20,14 @@ import json
 import logging
 import os
 import re
+import signal
 import time
 import uuid
+from contextlib import aclosing
 from pathlib import Path
+from typing import AsyncIterator
+
+import anyio
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -86,6 +91,9 @@ class SessionStore:
 
     def touch(self, device: str, sid: str, now: float) -> None:
         self.data[device] = {"id": sid, "t": now}
+        self._save()
+
+    def _save(self) -> None:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data))
         os.chmod(tmp, 0o600)
@@ -93,15 +101,16 @@ class SessionStore:
 
     def drop(self, device: str) -> None:
         self.data.pop(device, None)
+        self._save()
 
 
-def build_command(s: Settings, sid: str, new: bool) -> list[str]:
+def build_command(s: Settings, sid: str, new: bool, stream: bool = False) -> list[str]:
     """The spoken text goes on stdin, never argv: no option parsing, not in ps."""
     cmd = [
         s.claude_bin, "-p",
         "--bare",
         "--disable-slash-commands",
-        "--output-format", "json",
+        "--output-format", "stream-json" if stream else "json",
         "--model", s.model,
         "--tools", s.builtin_tools,
         "--permission-mode", "dontAsk",
@@ -109,6 +118,8 @@ def build_command(s: Settings, sid: str, new: bool) -> list[str]:
         "--system-prompt", s.policy,
         "--max-budget-usd", str(s.max_budget_usd),
     ]
+    if stream:
+        cmd += ["--verbose", "--include-partial-messages"]
     if s.allowed_tools:
         cmd += ["--allowedTools", s.allowed_tools]
     if s.mcp_config:
@@ -131,6 +142,96 @@ def parse_result(stdout: bytes) -> str:
     if isinstance(data, dict) and not data.get("is_error"):
         return str(data.get("result") or "").strip()
     return ""
+
+
+async def stream_turn(s: Settings, store: SessionStore, lock: asyncio.Lock,
+                      device: str, text: str) -> AsyncIterator[str]:
+    """Yield only public text deltas; own the child until it is reaped.
+
+    A turn may already have performed a tool action when it fails. Never retry
+    it, and discard its session unless a successful result and exit agree.
+    Stderr is drained without retaining/logging potentially sensitive contents.
+    """
+    async with lock:
+        sid, new = store.get(device, time.time())
+        proc = None
+        stderr_task = None
+        success = False
+        emitted = False
+        result = None
+
+        async def drain_stderr():
+            while await proc.stderr.read(8192):
+                pass
+
+        try:
+            async with asyncio.timeout(s.timeout):
+                proc = await asyncio.create_subprocess_exec(
+                    *build_command(s, sid, new, stream=True), cwd=s.workdir,
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE, limit=1024 * 1024,
+                    start_new_session=True,
+                )
+                stderr_task = asyncio.create_task(drain_stderr())
+                proc.stdin.write(text.encode())
+                await proc.stdin.drain()
+                proc.stdin.close()
+                while line := await proc.stdout.readline():
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        raise ValueError("Invalid stream event")
+                    if event.get("type") == "result":
+                        result = event
+                    elif event.get("type") == "stream_event":
+                        message = event.get("event") or {}
+                        if not isinstance(message, dict):
+                            raise ValueError("Invalid stream message")
+                        delta = message.get("delta") or {}
+                        if not isinstance(delta, dict):
+                            raise ValueError("Invalid stream delta")
+                        if (message.get("type") == "content_block_delta"
+                                and delta.get("type") == "text_delta"
+                                and isinstance(delta.get("text"), str)
+                                and delta["text"]):
+                            emitted = True
+                            yield delta["text"]
+                await proc.wait()
+                await stderr_task
+                reply = parse_result(json.dumps(result).encode())
+                if proc.returncode == 0 and reply:
+                    store.touch(device, sid, time.time())
+                    success = True
+                    if not emitted:
+                        yield reply
+                else:
+                    log.warning("[%s] Claude stream failed (exit %s)", device, proc.returncode)
+        except (TimeoutError, OSError, ValueError) as exc:
+            log.warning("[%s] Claude stream failed (%s)", device, type(exc).__name__)
+        finally:
+            # Starlette cancels its response task when the client disconnects.
+            # Shield teardown so a disconnect cannot leave a child or lock behind.
+            with anyio.CancelScope(shield=True):
+                if proc is not None:
+                    if not success:
+                        try:
+                            # Claude can own MCP children that inherit its pipes.
+                            # Terminate this turn's isolated group on cancellation.
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    # Drain any unread stdout after kill: Process.wait() can
+                    # otherwise block on a paused subprocess pipe transport.
+                    while await proc.stdout.read(8192):
+                        pass
+                    await proc.wait()
+                if stderr_task is not None:
+                    if not stderr_task.done():
+                        stderr_task.cancel()
+                    await asyncio.gather(stderr_task, return_exceptions=True)
+                if not success:
+                    store.drop(device)
+    if not success:
+        yield ("\n" if emitted else "") + FALLBACK_REPLY
 
 
 def extract_user_text(body: dict) -> str:
@@ -189,16 +290,27 @@ def create_app(s: Settings) -> FastAPI:
         if not DEVICE_RE.match(device):
             raise HTTPException(400, "user must be a device id")
         text = extract_user_text(body).strip()
-        reply = await run_turn(device, text) if text else "Sorry, I didn't catch that."
         model = body.get("model", "voice-agent")
         if body.get("stream"):
             async def chunks():
-                chunk = {"id": "va", "object": "chat.completion.chunk", "model": model,
-                         "choices": [{"index": 0, "delta": {"content": reply},
-                                      "finish_reason": None}]}
-                yield "data: " + json.dumps(chunk) + "\n\n"
+                async def contents():
+                    if not text:
+                        yield "Sorry, I didn't catch that."
+                        return
+                    lock = locks.setdefault(device, asyncio.Lock())
+                    async with aclosing(stream_turn(s, store, lock, device, text)) as turn:
+                        async for delta in turn:
+                            yield delta
+
+                async with aclosing(contents()) as content:
+                    async for delta in content:
+                        chunk = {"id": "va", "object": "chat.completion.chunk", "model": model,
+                                 "choices": [{"index": 0, "delta": {"content": delta},
+                                              "finish_reason": None}]}
+                        yield "data: " + json.dumps(chunk) + "\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(chunks(), media_type="text/event-stream")
+        reply = await run_turn(device, text) if text else "Sorry, I didn't catch that."
         return JSONResponse({
             "id": "va", "object": "chat.completion", "model": model,
             "choices": [{"index": 0, "finish_reason": "stop",

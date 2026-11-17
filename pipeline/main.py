@@ -7,6 +7,7 @@ import os
 import socket
 import time
 import warnings
+from contextlib import aclosing
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
@@ -200,6 +201,33 @@ async def multicast_listener(config: dict, manager: DeviceManager):
         await greet_device(device, config)
 
 
+async def interruptible_sentences(device, text, extra_context):
+    """Close the upstream HTTP stream promptly when the user interrupts."""
+    interrupted = asyncio.create_task(device.interrupted.wait())
+    next_sentence = None
+    try:
+        async with aclosing(device.conversation.stream(text, extra_context=extra_context)) as deltas:
+            async with aclosing(sentence_chunks(deltas)) as sentences:
+                try:
+                    while not device.interrupted.is_set():
+                        next_sentence = asyncio.create_task(anext(sentences))
+                        done, _ = await asyncio.wait(
+                            (next_sentence, interrupted), return_when=asyncio.FIRST_COMPLETED)
+                        if interrupted in done:
+                            break
+                        try:
+                            yield next_sentence.result()
+                        except StopAsyncIteration:
+                            break
+                finally:
+                    if next_sentence is not None:
+                        next_sentence.cancel()
+                        await asyncio.gather(next_sentence, return_exceptions=True)
+    finally:
+        interrupted.cancel()
+        await asyncio.gather(interrupted, return_exceptions=True)
+
+
 async def process_utterances(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue):
     """Process complete utterances: ASR -> Conversation -> TTS -> Opus -> TCP."""
     tcp_port = config["network"]["tcp_port"]
@@ -249,7 +277,6 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
 
             turn_t0 = time.monotonic()
             full_response: list[str] = []
-            pending: str | None = None   # sentence waiting to be flushed
             sent_partial = False           # any non-final chunk already sent?
             first_sentence_at: float | None = None
             stream_start_at: float | None = None
@@ -261,11 +288,21 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                 if device.interrupted.is_set():
                     log.info(f"Interrupted before TTS")
                     return False
+                synthesis = asyncio.create_task(tts.synthesize(sentence, device.voice, config))
+                interrupted = asyncio.create_task(device.interrupted.wait())
                 try:
-                    pcm = await tts.synthesize(sentence, device.voice, config)
+                    done, _ = await asyncio.wait(
+                        (synthesis, interrupted), return_when=asyncio.FIRST_COMPLETED)
+                    if interrupted in done:
+                        return False
+                    pcm = synthesis.result()
                 except Exception as e:
                     log.error(f"TTS  failed: {e}")
                     return False
+                finally:
+                    synthesis.cancel()
+                    interrupted.cancel()
+                    await asyncio.gather(synthesis, interrupted, return_exceptions=True)
                 if device.interrupted.is_set():
                     log.info(f"Interrupted before send")
                     return False
@@ -326,32 +363,29 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             aborted = False
             try:
                 stream_start_at = time.monotonic()
-                async for sentence in sentence_chunks(
-                    device.conversation.stream(text, extra_context=extra_context)
-                ):
-                    full_response.append(sentence)
-                    if first_sentence_at is None:
-                        first_sentence_at = time.monotonic()
-                        ttfs_turn = first_sentence_at - turn_t0
-                        ttfs_stream = first_sentence_at - stream_start_at
-                        log.info(f"LLM  first sentence [+{ttfs_turn:.2f}s turn / "
-                                 f"{ttfs_stream:.2f}s stream]: {sentence}")
-                    else:
-                        log.debug(f"LLM  sentence: {sentence}")
+                async with aclosing(interruptible_sentences(device, text, extra_context)) as sentences:
+                    async for sentence in sentences:
+                        full_response.append(sentence)
+                        if first_sentence_at is None:
+                            first_sentence_at = time.monotonic()
+                            ttfs_turn = first_sentence_at - turn_t0
+                            ttfs_stream = first_sentence_at - stream_start_at
+                            log.info(f"LLM  first sentence [+{ttfs_turn:.2f}s turn / "
+                                     f"{ttfs_stream:.2f}s stream]: {sentence}")
+                        else:
+                            log.debug(f"LLM  sentence: {sentence}")
 
-                    # Make sure the stall audio has finished sending before we
-                    # start pushing OpenClaw content to the device.
-                    if stall_task is not None and not stall_task.done():
-                        await stall_task
-                        stall_task = None
+                        # Make sure the stall audio has finished sending before we
+                        # start pushing OpenClaw content to the device.
+                        if stall_task is not None and not stall_task.done():
+                            await stall_task
+                            stall_task = None
 
-                    # Flush the *previous* sentence as non-final; whichever
-                    # sentence is last when the stream ends becomes the final.
-                    if pending is not None:
-                        if not await send_sentence(pending, is_final=False):
+                        # Speak the first completed sentence without waiting for
+                        # another one. An empty final audio restores the mic below.
+                        if not await send_sentence(sentence, is_final=False):
                             aborted = True
                             break
-                    pending = sentence
             except Exception as e:
                 log.error(f"LLM  failed: {e}")
                 if stall_task is not None:
@@ -371,22 +405,13 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     pass
                 stall_task = None
 
-            if aborted:
+            if aborted or device.interrupted.is_set():
                 await reopen_mic_if_needed()
                 continue
 
-            if pending is not None:
-                if not await send_sentence(pending, is_final=True):
-                    await reopen_mic_if_needed()
-                    continue
-            elif sent_partial:
-                # The stall played but OpenClaw returned nothing — reopen mic.
-                if not device.ptt:
-                    await send_audio(device.ip, tcp_port, b"",
-                                     mic_timeout=dev_cfg["default_mic_timeout"],
-                                     volume=0, fade=0)
-            elif not device.ptt:
-                # No content from the LLM and no stall — still reopen the mic.
+            if not device.ptt:
+                # The stream is complete, including a possible trailing fragment.
+                # This final control message also covers an empty response.
                 await send_audio(device.ip, tcp_port, b"",
                                  mic_timeout=dev_cfg["default_mic_timeout"],
                                  volume=0, fade=0)
@@ -412,8 +437,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     pass
         finally:
             device.processing = False
-
-        utterance_queue.task_done()
+            utterance_queue.task_done()
 
 
 class ColorFormatter(logging.Formatter):

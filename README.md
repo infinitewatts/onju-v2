@@ -109,6 +109,13 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
   It answers each turn with headless `claude -p --bare`, resuming one session per
   device (it expires after 30 idle minutes). The API key comes from the BWS profile
   `onju-voice`, with a per-turn `--max-budget-usd` cap.
+- **Streaming:** streaming requests use Claude's `stream-json` text deltas;
+  thinking and tool arguments are not spoken. Each completed sentence starts
+  TTS immediately, without waiting for a second sentence or the full reply.
+  TTS still produces one complete sentence WAV at a time. A final empty audio
+  message restores the microphone timeout. Interrupting closes the upstream
+  response; the gateway terminates/reaps the interrupted CLI process and does
+  not retry a turn that might already have queued a task.
 - **Scope:** anyone in the room can speak, and the speaker isn't authenticated. So
   the agent only gets web search/fetch and the `board` MCP (`board_mcp.py`): read
   the board summary, and queue a task. There is no Bash, no file access, and none

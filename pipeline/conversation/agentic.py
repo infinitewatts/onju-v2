@@ -63,12 +63,15 @@ class AgenticBackend:
         kwargs = self._build_kwargs(user_text, extra_context)
         kwargs["stream"] = True
         stream = await self.client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta.content or ""
-            if delta:
-                yield delta
+        try:
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta.content or ""
+                if delta:
+                    yield delta
+        finally:
+            await stream.close()
 
     def commit(self, text: str) -> None:
         pass  # remote service owns history
