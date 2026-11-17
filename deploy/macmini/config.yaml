@@ -21,9 +21,13 @@ tts:
   backend: "local"
   local:
     url: "http://127.0.0.1:8880"
-    model: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit"
+    model: "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-8bit"
     voice: "aiden"
     lang_code: "English"
+    instruct: >-
+      Speak clearly at normal conversational volume, like a helpful colleague.
+      Use a relaxed, friendly tone with natural intonation and moderate emphasis.
+      Keep an even pace.
 
 vad:
   threshold: 0.5

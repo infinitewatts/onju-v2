@@ -106,6 +106,8 @@ tts:
   backend: "elevenlabs"                      # "local" or "elevenlabs" (cloud)
   local:
     url: "http://localhost:8880"
+    # Optional speaking style for models supporting instructions (not spoken text):
+    # instruct: "Speak calmly with clear pronunciation and restrained emphasis."
     model: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit"
     ref_audio: ""
     ref_text: ""

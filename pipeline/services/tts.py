@@ -55,7 +55,7 @@ async def _local(text: str, config: dict) -> bytes:
         "response_format": "wav",
     }
 
-    for key in ("voice", "lang_code"):
+    for key in ("voice", "lang_code", "instruct"):
         if local_cfg.get(key):
             payload[key] = local_cfg[key]
 
