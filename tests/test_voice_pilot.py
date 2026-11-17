@@ -318,6 +318,31 @@ class ControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.pilot.get("pilot-1")["status"], "failed")
         self.send.assert_not_called()
 
+    async def test_handler_finishing_body_after_shutdown_cannot_start_speech(self):
+        body = json.dumps(PAYLOAD).encode()
+        reader = asyncio.StreamReader()
+        reader.feed_data(f"POST /pilot/question HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n".encode())
+        writer = FakeWriter()
+        handler = asyncio.create_task(self.handle(reader, writer))
+        try:
+            await asyncio.sleep(0)
+            self.assertFalse(handler.done())
+            self.task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await self.task
+            reader.feed_data(body)
+            reader.feed_eof()
+            await asyncio.wait_for(handler, 2)
+            header, _ = bytes(writer.data).split(b"\r\n\r\n", 1)
+            self.assertEqual(int(header.split()[1]), 404)
+            self.assertEqual(self.pilot.records, {})
+            self.assertFalse(self.dev.processing)
+            self.tts.assert_not_called()
+            self.send.assert_not_called()
+        finally:
+            handler.cancel()
+            await asyncio.gather(handler, return_exceptions=True)
+
     async def test_shutdown_before_question_task_runs_releases_reservation(self):
         await self.request("POST", payload=PAYLOAD)
         self.task.cancel()

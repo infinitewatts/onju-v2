@@ -629,6 +629,7 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
     port = config.get("network", {}).get("control_port", 3002)
     pilot = pilot if pilot is not None else VoicePilot(config.get("voice_pilot", {}))
     pilot_tasks: dict[asyncio.Task, tuple[str, Device]] = {}
+    closing = False
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -659,8 +660,8 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
 
             target = urlsplit(path)
             if target.path == "/pilot/question":
-                if not pilot.enabled:
-                    raise PilotError(404, "Voice pilot is disabled")
+                if closing or not pilot.enabled:
+                    raise PilotError(404, "Voice pilot is unavailable")
                 if method == "POST" and not target.query:
                     payload = json.loads(body)
                     pilot.validate(payload)  # all shape/host checks precede side effects
@@ -739,6 +740,9 @@ async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot
         async with server:
             await server.serve_forever()
     finally:
+        # Existing handlers can still be reading their request bodies when the
+        # listener closes. They must not reserve work after this teardown begins.
+        closing = True
         reservations = list(pilot_tasks.items())
         for task, _ in reservations:
             task.cancel()
