@@ -9,6 +9,7 @@ import socket
 import time
 import warnings
 from contextlib import aclosing
+from urllib.parse import parse_qs, urlsplit
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
@@ -21,6 +22,8 @@ from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
 from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
 from pipeline.services import asr, tts
+from pipeline.security import validate_device
+from pipeline.voice_pilot import PilotError, VoicePilot, QUESTION
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +33,72 @@ def load_config(path: str = None) -> dict:
         path = os.path.join(os.path.dirname(__file__), "config.yaml")
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+async def _queue_utterance(queue, device, audio, *, reserved=False):
+    # Reserve queued work before yielding, so a control prompt cannot jump in
+    # front of an already captured utterance for this same speaker.
+    if not reserved:
+        device.queued_utterances = getattr(device, "queued_utterances", 0) + 1
+    try:
+        await queue.put((device, audio))
+    except BaseException:
+        device.queued_utterances -= 1
+        raise
+
+
+def _reset_pilot_capture(device):
+    gate = getattr(device, "wake_gate", None)
+    if gate is not None:
+        gate.reset()
+    vad = getattr(device, "vad", None)
+    if vad is not None:
+        vad.reset()
+        vad.pre_buffer.clear()
+
+
+async def _play_pilot_line(config, device, line, may_send=None):
+    pcm = await tts.synthesize(line, device.voice, config)
+    if may_send is not None and not may_send():
+        return False
+    frames = opus_encode(pcm, config["audio"]["sample_rate"],
+                         config["audio"]["opus_frame_size"])
+    await send_audio(device.ip, config["network"]["tcp_port"],
+                     opus_frames_to_tcp_payload(frames),
+                     mic_timeout=config["device"]["default_mic_timeout"],
+                     volume=config["device"]["default_volume"],
+                     fade=config["device"]["led_fade"])
+    # The transport's successful return is not evidence of audible delivery.
+    return True
+
+
+async def _speak_pilot_question(config, pilot, question_id, device):
+    try:
+        if not pilot.speaking(question_id):
+            return
+        _reset_pilot_capture(device)
+        if device.vad_writer is not None:
+            await close_led_connection(device.vad_writer)
+            device.vad_writer = None
+        sent = await _play_pilot_line(config, device, QUESTION,
+                                      may_send=lambda: pilot.can_send(question_id))
+        if sent:
+            pilot.awaiting_answer(question_id)
+    except asyncio.CancelledError:
+        pilot.fail(question_id)
+        raise
+    except Exception as exc:
+        pilot.fail(question_id)
+        log.warning("Pilot speech failed (%s)", type(exc).__name__)
+    finally:
+        try:
+            _reset_pilot_capture(device)
+        except Exception as exc:
+            pilot.fail(question_id)
+            log.warning("Pilot capture reset failed (%s)", type(exc).__name__)
+        finally:
+            device.pilot_speaking = False
+            device.processing = False
 
 
 async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue):
@@ -72,22 +141,29 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
                     dev.ptt_buffer.clear()
                     if len(audio) > min_utterance_samples:
                         log.info(f"PTT  end from {hostname} ({len(audio)/sample_rate:.1f}s)")
-                        await utterance_queue.put((dev, audio))
+                        await _queue_utterance(utterance_queue, dev, audio)
 
                 # VOX device: flush if VAD was recording but packets stopped
                 elif not dev.ptt and dev.vad.recording:
-                    if dev.vad_writer is not None:
-                        await close_led_connection(dev.vad_writer)
-                        dev.vad_writer = None
-                    was_recording[hostname] = False
-                    audio = np.concatenate(dev.vad.buffer) if dev.vad.buffer else None
-                    dev.vad.reset()
-                    gate = getattr(dev, "wake_gate", None)
-                    if gate is not None:
-                        gate.reset()
+                    dev.queued_utterances = getattr(dev, "queued_utterances", 0) + 1
+                    try:
+                        if dev.vad_writer is not None:
+                            await close_led_connection(dev.vad_writer)
+                            dev.vad_writer = None
+                        was_recording[hostname] = False
+                        audio = np.concatenate(dev.vad.buffer) if dev.vad.buffer else None
+                        dev.vad.reset()
+                        gate = getattr(dev, "wake_gate", None)
+                        if gate is not None:
+                            gate.reset()
+                    except BaseException:
+                        dev.queued_utterances -= 1
+                        raise
                     if audio is not None and len(audio) > min_utterance_samples:
                         log.info(f"VAD  timeout from {hostname} ({len(audio)/sample_rate:.1f}s)")
-                        await utterance_queue.put((dev, audio))
+                        await _queue_utterance(utterance_queue, dev, audio, reserved=True)
+                    else:
+                        dev.queued_utterances -= 1
             continue
 
         device = manager.get_by_ip(addr[0])
@@ -166,15 +242,20 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             was_recording[device.hostname] = curr_recording
 
             if utterance is not None:
-                if wake_gate is not None:
-                    wake_gate.reset()
-                # Close persistent LED connection before queuing utterance
-                if device.vad_writer is not None:
-                    await close_led_connection(device.vad_writer)
-                    device.vad_writer = None
-                was_recording[device.hostname] = False
+                # Captured speech owns the device before any LED cleanup await.
+                device.queued_utterances = getattr(device, "queued_utterances", 0) + 1
+                try:
+                    if wake_gate is not None:
+                        wake_gate.reset()
+                    if device.vad_writer is not None:
+                        await close_led_connection(device.vad_writer)
+                        device.vad_writer = None
+                    was_recording[device.hostname] = False
+                except BaseException:
+                    device.queued_utterances -= 1
+                    raise
                 log.info(f"VAD  utterance from {device.hostname} ({len(utterance)/sample_rate:.1f}s)")
-                await utterance_queue.put((device, utterance))
+                await _queue_utterance(utterance_queue, device, utterance, reserved=True)
 
 
 async def maintain_wake_audio(config: dict, manager: DeviceManager):
@@ -279,14 +360,21 @@ async def interruptible_sentences(device, text, extra_context):
         await asyncio.gather(interrupted, return_exceptions=True)
 
 
-async def process_utterances(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue):
+async def process_utterances(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue,
+                             pilot: VoicePilot | None = None):
     """Process complete utterances: ASR -> Conversation -> TTS -> Opus -> TCP."""
     tcp_port = config["network"]["tcp_port"]
     dev_cfg = config["device"]
     no_speech_threshold = 0.45
+    pilot = pilot if pilot is not None else VoicePilot(config.get("voice_pilot", {}))
 
     while True:
         device, audio_int16 = await utterance_queue.get()
+        device.queued_utterances = max(0, getattr(device, "queued_utterances", 0) - 1)
+        if getattr(device, "pilot_speaking", False):
+            # The prompt task owns capture/processing until its final cleanup.
+            utterance_queue.task_done()
+            continue
 
         device.processing = True
         device.interrupted.clear()
@@ -328,6 +416,16 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             # Check for interrupt before LLM
             if device.interrupted.is_set():
                 log.info(f"Interrupted before LLM")
+                continue
+
+            pilot_line = pilot.intercept(device.hostname, text)
+            if pilot_line is not None:
+                # A pilot answer is a fixed local choice, never an agent request.
+                _reset_pilot_capture(device)
+                try:
+                    await _play_pilot_line(config, device, pilot_line)
+                except Exception as exc:
+                    log.warning("Pilot confirmation failed (%s)", type(exc).__name__)
                 continue
 
             # Streaming LLM → sentence-buffered TTS → Opus → TCP.
@@ -526,9 +624,12 @@ class ColorFormatter(logging.Formatter):
         return f"{self.GREY}{ts}{self.RESET}  {color}{msg}{self.RESET}"
 
 
-async def control_server(config: dict, manager: DeviceManager):
+async def control_server(config: dict, manager: DeviceManager, pilot: VoicePilot | None = None):
     """Tiny HTTP endpoint for runtime device management."""
     port = config.get("network", {}).get("control_port", 3002)
+    pilot = pilot if pilot is not None else VoicePilot(config.get("voice_pilot", {}))
+    pilot_tasks: dict[asyncio.Task, tuple[str, Device]] = {}
+    closing = False
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -557,7 +658,43 @@ async def control_server(config: dict, manager: DeviceManager):
                     return
                 body = await asyncio.wait_for(reader.readexactly(cl), timeout=5)
 
-            if path == "/devices" and method == "GET":
+            target = urlsplit(path)
+            if target.path == "/pilot/question":
+                if closing or not pilot.enabled:
+                    raise PilotError(404, "Voice pilot is unavailable")
+                if method == "POST" and not target.query:
+                    payload = json.loads(body)
+                    pilot.validate(payload)  # all shape/host checks precede side effects
+                    device = manager.devices.get(payload["device"])
+                    if device is None:
+                        raise PilotError(404, "Pilot device is not registered")
+                    validate_device(config, device.hostname, device.ip)
+                    if device.ptt or getattr(device, "wake_gate", None) is None:
+                        raise PilotError(409, "Pilot device requires local wake gating")
+                    busy = (device.processing or getattr(device, "queued_utterances", 0) > 0
+                            or bool(device.ptt_buffer) or bool(device.vad.recording)
+                            or bool(device.wake_gate.active))
+                    result, created = pilot.submit(payload, device.hostname, busy=busy)
+                    if created:
+                        # Reserve synchronously; the task is the only owner that
+                        # releases this processing flag in its finally block.
+                        device.processing = True
+                        device.pilot_speaking = True
+                        device.interrupted.clear()
+                        task = asyncio.create_task(_speak_pilot_question(
+                            config, pilot, payload["id"], device))
+                        pilot_tasks[task] = (payload["id"], device)
+                        task.add_done_callback(lambda done: pilot_tasks.pop(done, None))
+                    _http_respond(writer, 202 if created else 200, json.dumps(result))
+                elif method == "GET":
+                    query = parse_qs(target.query, keep_blank_values=True)
+                    if set(query) != {"id"} or len(query["id"]) != 1:
+                        raise PilotError(400, "Expected one question ID")
+                    _http_respond(writer, 200, json.dumps(pilot.get(query["id"][0])))
+                else:
+                    raise PilotError(400, "Invalid pilot request")
+
+            elif path == "/devices" and method == "GET":
                 data = {k: v.to_dict() for k, v in manager.devices.items()}
                 resp = json.dumps(data, indent=2)
                 _http_respond(writer, 200, resp)
@@ -586,6 +723,9 @@ async def control_server(config: dict, manager: DeviceManager):
                 _http_respond(writer, 404, "not found")
 
             await writer.drain()
+        except PilotError as exc:
+            _http_respond(writer, exc.status, json.dumps({"error": str(exc)}))
+            await writer.drain()
         except (ValueError, KeyError) as e:
             _http_respond(writer, 400, "Invalid or unapproved device")
             await writer.drain()
@@ -596,12 +736,33 @@ async def control_server(config: dict, manager: DeviceManager):
 
     server = await asyncio.start_server(handle, "127.0.0.1", port)
     log.info(f"CTRL listening on :{port}")
-    async with server:
-        await server.serve_forever()
+    try:
+        async with server:
+            await server.serve_forever()
+    finally:
+        # Existing handlers can still be reading their request bodies when the
+        # listener closes. They must not reserve work after this teardown begins.
+        closing = True
+        reservations = list(pilot_tasks.items())
+        for task, _ in reservations:
+            task.cancel()
+        if reservations:
+            await asyncio.gather(*(task for task, _ in reservations), return_exceptions=True)
+        # A task cancelled before its first instruction never enters its own
+        # finally block. Release that reservation here as well.
+        for _, (question_id, device) in reservations:
+            if getattr(device, "pilot_speaking", False):
+                pilot.fail(question_id)
+                try:
+                    _reset_pilot_capture(device)
+                finally:
+                    device.pilot_speaking = False
+                    device.processing = False
 
 
 def _http_respond(writer: asyncio.StreamWriter, status: int, body: str):
-    reason = {200: "OK", 201: "Created", 400: "Bad Request", 404: "Not Found"}.get(status, "OK")
+    reason = {200: "OK", 201: "Created", 202: "Accepted", 400: "Bad Request",
+              404: "Not Found", 409: "Conflict"}.get(status, "OK")
     writer.write(f"HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}".encode())
 
 
@@ -731,13 +892,14 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
         await warmup(config)
 
     utterance_queue = asyncio.Queue()
+    pilot = VoicePilot(config.get("voice_pilot", {}))
 
     _log_startup_summary(config)
     await asyncio.gather(
         udp_listener(config, manager, utterance_queue),
         multicast_listener(config, manager),
-        process_utterances(config, manager, utterance_queue),
-        control_server(config, manager),
+        process_utterances(config, manager, utterance_queue, pilot),
+        control_server(config, manager, pilot),
         maintain_wake_audio(config, manager),
     )
 

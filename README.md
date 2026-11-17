@@ -140,6 +140,16 @@ agent (`:18789`) and the pipeline. Everything is loopback except the device port
   read-back from the generated `~/.codex/board-view.md`. It never dispatches agents or edits the board. Picking up the task
   is the orchestrator's job.
 
+#### Bounded Orchestrator voice pilot
+
+The optional `voice_pilot` is a connection test, not a general approval channel.
+It asks a fixed blue/green question, captures a numbered choice locally after
+"Hey Aiden", and exposes the result on the existing loopback control server.
+It does not call Claude to interpret choices, authenticate the speaker, dispatch
+work, or send answers to another chat by itself. See
+[the pilot procedure](docs/orchestrator-voice-pilot.md) for session binding and
+the explicit same-chat acknowledgement required to prove the round trip.
+
 Install or refresh (after a merge to master):
 ```sh
 # Mini (one-time preparation before enabling wake_word)
