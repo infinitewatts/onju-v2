@@ -608,6 +608,8 @@ def _configured_device_args(config: dict, manual: list[str] = None) -> list[str]
     The multicast announce is the only other way a device registers, and a pipeline
     that restarted after the speaker's last announce never sees it. Registering the
     allowed devices at startup means the speaker's audio is accepted right away.
+    Startup entries are voice-activated (VOX); a push-to-talk speaker must be
+    passed as --device NAME=IP:ptt, which takes precedence here.
     """
     seen = {_parse_device_arg(entry)[1] for entry in (manual or [])}
     return [f"{name}={ip}" for name, ip in (config.get("network", {}).get("allowed_devices") or {}).items()

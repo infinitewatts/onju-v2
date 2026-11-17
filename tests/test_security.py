@@ -93,10 +93,6 @@ class TransportBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await server.wait_closed()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StartupRegistrationTests(unittest.TestCase):
     def test_allowed_devices_register_at_startup_unless_given_manually(self):
         from pipeline.main import _configured_device_args
@@ -105,3 +101,7 @@ class StartupRegistrationTests(unittest.TestCase):
         self.assertEqual(_configured_device_args(cfg, [f"x={IP}:ptt"]), ["onju-D4E5F6=192.168.1.51"])
         self.assertEqual(_configured_device_args({"network": {}}), [])
         self.assertEqual(_configured_device_args({"network": {"allowed_devices": None}}), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
