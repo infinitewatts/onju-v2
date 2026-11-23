@@ -42,9 +42,7 @@ static Result run(int delay, double hiss, double gain2, int blocks, double dc1 =
         }
         mic_combine(&m, raw.data(), FRAMES, work.data(), out.data(), 0.001f);
         if (b >= blocks / 2) {  // after settling
-            int shift = m.lag > 0 ? m.lag : 0;  // output is aligned to the later arrival
-            int late = delay > 0 ? delay : 0;
-            (void)shift;
+            int late = delay > 0 ? delay : 0;  // output is aligned to the later arrival
             for (int i = 8; i < FRAMES; i++) {
                 int n = b * FRAMES + i;
                 double want = speech(n - late);
@@ -99,6 +97,62 @@ int main() {
             mic_combine(&m, raw.data(), FRAMES, work.data(), out.data(), 0.001f);
         }
         expect(m.lag == 0 && m.mode == MIC_BOTH, "hiss alone keeps zero delay");
+    }
+    // A delay between two whole samples settles on one neighbour and stays there.
+    for (double frac : {0.5, 1.5, 2.5}) {
+        MicCombiner m; mic_combiner_init(&m, 0, 0);
+        std::vector<int32_t> raw(2 * FRAMES);
+        std::vector<int16_t> work(2 * (MIC_MAX_LAG + FRAMES)), out(FRAMES);
+        int changes = 0, last = 0;
+        for (int b = 0; b < 200; b++) {
+            for (int i = 0; i < FRAMES; i++) {
+                double n = b * FRAMES + i;
+                double s1 = 3000.0 * (std::sin(n * 0.11) + 0.7 * std::sin(n * 0.37 + 1.0) + 0.5 * std::sin(n * 0.83 + 2.0));
+                double d = n - frac;
+                double s2 = 3000.0 * (std::sin(d * 0.11) + 0.7 * std::sin(d * 0.37 + 1.0) + 0.5 * std::sin(d * 0.83 + 2.0));
+                raw[2 * i] = word(s1 + 300 * noise()); raw[2 * i + 1] = word(s2 + 300 * noise());
+            }
+            mic_combine(&m, raw.data(), FRAMES, work.data(), out.data(), 0.001f);
+            if (b >= 40 && m.lag != last) changes++;
+            last = m.lag;
+        }
+        expect(changes == 0, "delay does not flip once settled");
+        expect(m.lag == (int)frac || m.lag == (int)frac + 1, "fractional delay lands on a neighbouring sample");
+    }
+    // A slot with no working mic reads as loud noise: it is rejected, during speech too.
+    {
+        MicCombiner m; mic_combiner_init(&m, 0, 0);
+        std::vector<int32_t> raw(2 * FRAMES);
+        std::vector<int16_t> work(2 * (MIC_MAX_LAG + FRAMES)), out(FRAMES);
+        int wrong = 0;
+        for (int b = 0; b < 200; b++) {
+            bool talking = b >= 100;
+            for (int i = 0; i < FRAMES; i++) {
+                double real = (talking ? 2.0 * speech(b * FRAMES + i) : 0) + 40 * noise();
+                raw[2 * i] = word(real);
+                raw[2 * i + 1] = (int32_t)(noise() * 2147483000.0);
+            }
+            mic_combine(&m, raw.data(), FRAMES, work.data(), out.data(), 0.001f);
+            if (b >= 30 && m.mode != MIC_FIRST_ONLY) wrong++;
+        }
+        expect(wrong == 0, "noise-filled slot stays rejected while the good mic hears speech");
+    }
+    // A mic right at the quiet threshold does not flip the choice back and forth.
+    {
+        MicCombiner m; mic_combiner_init(&m, 0, 0);
+        std::vector<int32_t> raw(2 * FRAMES);
+        std::vector<int16_t> work(2 * (MIC_MAX_LAG + FRAMES)), out(FRAMES);
+        int changes = 0; MicMode last = MIC_BOTH;
+        for (int b = 0; b < 400; b++) {
+            for (int i = 0; i < FRAMES; i++) {
+                double s = speech(b * FRAMES + i);
+                raw[2 * i] = word(s + 300 * noise()); raw[2 * i + 1] = word(0.125 * (s + 300 * noise()));
+            }
+            mic_combine(&m, raw.data(), FRAMES, work.data(), out.data(), 0.001f);
+            if (b >= 40 && m.mode != last) changes++;
+            last = m.mode;
+        }
+        expect(changes <= 1, "choice of mic does not flap at the threshold");
     }
     std::printf("PASS: mic combiner\n");
     return 0;
