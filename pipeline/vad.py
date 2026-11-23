@@ -36,6 +36,7 @@ class VAD:
         self.threshold = vad_cfg["threshold"]
         self.neg_threshold = vad_cfg["neg_threshold"]
         self.silence_time = vad_cfg["silence_time"]
+        self.short_speech_pause_s = vad_cfg.get("short_speech_pause_s", self.silence_time)
 
         prebuf_frames = int(vad_cfg["pre_buffer_s"] * frames_per_sec)
 
@@ -43,6 +44,7 @@ class VAD:
         self.pre_buffer: deque[np.ndarray] = deque(maxlen=prebuf_frames)
         self.buffer: list[np.ndarray] = []
         self.recording = False
+        self.voiced_frames = 0
         self.silence_count = 0
         self.frames_per_sec = frames_per_sec
         self.speech_prob = 0.0
@@ -55,6 +57,7 @@ class VAD:
     def reset(self):
         self.buffer = []
         self.recording = False
+        self.voiced_frames = 0
         self.silence_count = 0
         self.speech_prob = 0.0
         self._state = np.zeros((2, 1, 128), dtype=np.float32)
@@ -82,6 +85,7 @@ class VAD:
             self.pre_buffer.append(pcm_int16)
             if self.speech_prob >= self.threshold:
                 self.recording = True
+                self.voiced_frames = 1
                 self.buffer.extend(self.pre_buffer)
                 self.pre_buffer.clear()
             return None
@@ -90,11 +94,14 @@ class VAD:
 
         if self.speech_prob < self.neg_threshold:
             self.silence_count += 1
-            if self.silence_count > self.silence_time * self.frames_per_sec:
+            pause = (self.short_speech_pause_s if self.voiced_frames < self.frames_per_sec
+                     else self.silence_time)
+            if self.silence_count > pause * self.frames_per_sec:
                 audio = np.concatenate(self.buffer)
                 self.reset()
                 return audio
         else:
+            self.voiced_frames += 1
             self.silence_count = 0
 
         return None

@@ -33,11 +33,13 @@ vad:
   threshold: 0.5
   neg_threshold: 0.35
   silence_time: 1.5
+  short_speech_pause_s: 3.0
   pre_buffer_s: 1.0
 
 wake_word:
   enabled: true
   backend: "local_asr"
+  follow_up_window_s: 15
   model_profile: "english"
   model_dir: "data/wakeword-english"
   command_window_s: 30

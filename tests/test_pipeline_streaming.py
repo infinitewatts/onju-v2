@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 
+from pipeline.local_wake import LocalSpeechWakeGate
 from pipeline.main import interruptible_sentences, process_utterances
 from pipeline.conversation.agentic import AgenticBackend
 from pipeline.protocol import send_audio
@@ -45,8 +46,9 @@ class PipelineStreamingTests(unittest.IsolatedAsyncioTestCase):
                         expected += bytes([0xDD, 0, timeout, 0, 0, 0])
                     self.assertEqual(payload, expected)
 
-    async def run_pipeline(self, stream, check):
+    async def run_pipeline(self, stream, check, *, gate=None, config=CONFIG):
         dev = device(stream)
+        dev.wake_gate = gate
         queue = asyncio.Queue()
         await queue.put((dev, np.zeros(512, dtype=np.int16)))
         sent = []
@@ -56,11 +58,12 @@ class PipelineStreamingTests(unittest.IsolatedAsyncioTestCase):
             sent.append((payload, kwargs))
             if payload:
                 first_audio.set()
+            return True
 
         with patch("pipeline.main.asr.transcribe", AsyncMock(return_value={"text": "Hello"})), \
              patch("pipeline.main.tts.synthesize", AsyncMock(return_value=b"\x00\x00" * 320)) as tts, \
              patch("pipeline.main.send_audio", side_effect=send):
-            task = asyncio.create_task(process_utterances(CONFIG, None, queue))
+            task = asyncio.create_task(process_utterances(config, None, queue))
             try:
                 await check(dev, queue, sent, first_audio, tts)
             finally:
@@ -69,6 +72,18 @@ class PipelineStreamingTests(unittest.IsolatedAsyncioTestCase):
                     await task
         self.assertFalse(dev.processing)
         return dev, sent
+
+    async def test_acknowledgment_reopens_conversation(self):
+        gate = Mock(spec=LocalSpeechWakeGate)
+        async def stream(*args, **kwargs):
+            yield "Okay."
+        async def check(dev, queue, sent, first_audio, tts):
+            await asyncio.wait_for(queue.join(), 2)
+            gate.await_follow_up.assert_called_once()
+            self.assertEqual(gate.await_follow_up.call_args.args[1], 15)
+            gate.reset.assert_not_called()
+        await self.run_pipeline(stream, check, gate=gate,
+                                config={**CONFIG, "wake_word": {"follow_up_window_s": 15}})
 
     async def test_first_sentence_plays_before_second_exists_and_tail_finishes(self):
         release = asyncio.Event()
