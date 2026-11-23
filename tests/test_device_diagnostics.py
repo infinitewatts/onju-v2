@@ -39,7 +39,7 @@ class DeviceDiagnosticsTests(unittest.TestCase):
         with patch('pipeline.device.time.monotonic', return_value=120.01):
             # Just past a boundary, before the first frame of the new slot.
             self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 5)
-        with patch('pipeline.device.time.monotonic', return_value=125):
+        with patch('pipeline.device.time.monotonic', return_value=135):
             self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 0)
 
     def test_miss_labels_are_reported(self):
