@@ -608,6 +608,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                         and not pilot.enabled and getattr(bridge, "mode", None) != "live"):
                     now = time.monotonic()
                     wake_gate.await_follow_up(now, window, max(0, playback_end - now))
+                    log.info("Follow-up armed for %s (%ss)", device.hostname, window)
                     keep_gate_open = True
             device.last_response = response_text
             elapsed = time.monotonic() - turn_t0

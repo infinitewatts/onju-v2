@@ -116,6 +116,24 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(gate.active)
         recognize.assert_not_awaited()
 
+    async def test_playback_gap_before_answer_keeps_original_deadline(self):
+        gate, _, _ = self.make()
+        frame = np.zeros(512, dtype=np.int16)
+        gate.await_follow_up(0, 15, 1)
+        self.assertTrue(gate.feed(frame, .01))
+        self.assertTrue(gate.feed(frame, 1.11))
+        self.assertFalse(gate.feed(frame, 15.02))
+        self.assertFalse(gate.active)
+
+    async def test_capture_gap_after_answer_starts_closes_gate(self):
+        gate, _, _ = self.make()
+        frame = np.zeros(512, dtype=np.int16)
+        gate.await_follow_up(0, 15, 1)
+        gate.feed(frame, .01)
+        gate.begin_command(.02)
+        self.assertFalse(gate.feed(frame, 1.11))
+        self.assertFalse(gate.active)
+
     async def test_disconnected_mic_cannot_open_stale_follow_up(self):
         gate, _, _ = self.make()
         gate.await_follow_up(0, 15, 8)

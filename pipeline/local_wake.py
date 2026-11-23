@@ -64,6 +64,7 @@ class LocalSpeechWakeGate:
         self._last_feed = None
         self.active = False
         self.just_activated = False
+        self._waiting_for_reply = False
         self._follow_up_window = 0
         self._deadline = 0
         self._command_started = False
@@ -108,6 +109,7 @@ class LocalSpeechWakeGate:
         self._pending.clear()
         self.vad.reset()
         self.vad.pre_buffer.clear()
+        self._waiting_for_reply = False
         self._follow_up_window = 0
         self.active = self.just_activated = False
         self._command_started = False
@@ -128,11 +130,13 @@ class LocalSpeechWakeGate:
         """Start the answer timer on resumed mic audio, with bounded playback grace."""
         self.reset()
         self.active = True
+        self._waiting_for_reply = True
         self._follow_up_window = min(window_s, 30)
         self._deadline = now + min(playback_remaining_s, 60) + self._follow_up_window
 
     def begin_command(self, now):
         if self.active and not self._command_started:
+            self._waiting_for_reply = False
             self._command_started = True
             self._deadline = now + 30
 
@@ -144,7 +148,9 @@ class LocalSpeechWakeGate:
         if self._last_feed is not None:
             gap = now - self._last_feed
             self.max_feed_gap_s = max(self.max_feed_gap_s, gap)
-            if gap < 0 or gap > 1:
+            # The board suppresses microphone packets during speaker playback.
+            # Keep an unstarted reply window through that gap, without renewing it.
+            if gap < 0 or (gap > 1 and not self._waiting_for_reply):
                 self.reset('gap')
         if self.active and now >= self._deadline:
             self.reset('expiry')
