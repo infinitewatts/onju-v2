@@ -65,6 +65,11 @@ class WavStreamParserTests(unittest.TestCase):
                 with self.assertRaises(WavStreamError):
                     WavStreamParser().feed(bytes(w))
 
+    def test_empty_final_piece_is_accepted(self):
+        stream = make_wav(pcm_of(100)) + make_wav(b"")
+        pieces = WavStreamParser().feed(stream)
+        self.assertEqual(b"".join(p[-1] for p in pieces), pcm_of(100))
+
     def test_bad_riff_and_garbage_fail(self):
         wav = bytearray(make_wav(pcm_of(100)))
         for off, val in ((4, 0), (4, 0xFFFFFFFF)):

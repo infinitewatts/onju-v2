@@ -147,3 +147,18 @@ class SendAudioStreamTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SilenceFrameTests(unittest.TestCase):
+    def test_silence_frame_does_not_disturb_the_speech_encoder(self):
+        import numpy as np
+        from pipeline.audio import OpusStreamEncoder
+        tone = (np.sin(np.arange(16000) * 0.2) * 8000).astype(np.int16).tobytes()
+        plain = OpusStreamEncoder(16000, 320)
+        expected = plain.encode(tone)
+        mixed = OpusStreamEncoder(16000, 320)
+        half = len(tone) // 2
+        got = mixed.encode(tone[:half])
+        mixed.silence_frame()
+        got += mixed.encode(tone[half:])
+        self.assertEqual(got, expected)

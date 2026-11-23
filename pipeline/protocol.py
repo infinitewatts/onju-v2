@@ -70,7 +70,7 @@ async def send_audio_stream(ip: str, port: int, frames, mic_timeout: int = 60, v
 
     Connects only after the first batch is available. The wire bytes for the
     same frames are identical to send_audio's. `stats.frames_written` counts
-    frames drained to the peer. Returns True on success, False otherwise.
+    frames accepted by the local socket (an upper bound on what the peer played). Returns True on success, False otherwise.
     """
     volume = max(0, min(16, int(volume)))
     header = bytes([0xAA, (mic_timeout >> 8) & 0xFF, mic_timeout & 0xFF, volume, fade, 2])

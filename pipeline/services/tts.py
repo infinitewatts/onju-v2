@@ -86,7 +86,8 @@ class WavStreamParser:
                 elif cid == b"data":
                     if self._fmt is None:
                         raise WavStreamError("data before fmt")
-                    if size in (0, 0xFFFFFFFF):
+                    # An empty final piece is fine only when the file really ends there.
+                    if size == 0xFFFFFFFF or (size == 0 and self._pos != self._riff_end):
                         raise WavStreamError("untrusted data length")
                     if size % (self._fmt[1] * self._fmt[2]):
                         raise WavStreamError("data length not block aligned")

@@ -378,6 +378,7 @@ async def interruptible_sentences(device, text, extra_context):
 
 STREAM_GAP_S = 0.1           # length of one silence block sent to avoid an underrun
 STREAM_MARGIN_S = 0.15       # send silence when the speaker has less audio than this left
+DEVICE_SENTENCE_GAP_S = 0.12 # silence the speaker itself plays after each sentence
 STREAM_SILENCE_CAP_S = 3.0   # max silence inserted per sentence
 
 
@@ -559,8 +560,14 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     """Next queue item, timeout_mark, or None when interrupted.
                     Times out on the queue, never on the generator."""
                     getter = asyncio.create_task(queue.get())
-                    await asyncio.wait((getter, interrupted), timeout=timeout,
-                                       return_when=asyncio.FIRST_COMPLETED)
+                    try:
+                        await asyncio.wait((getter, interrupted), timeout=timeout,
+                                           return_when=asyncio.FIRST_COMPLETED)
+                    except BaseException:
+                        # Cancelled while waiting: never leave the getter pending.
+                        getter.cancel()
+                        await asyncio.gather(getter, return_exceptions=True)
+                        raise
                     if interrupted.done():
                         getter.cancel()
                         await asyncio.gather(getter, return_exceptions=True)
@@ -584,7 +591,9 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     while True:
                         buffered_s = len(pending) * frame_s
                         lead_s = max(0.0, playback_end - time.monotonic())
-                        if finished or buffered_s >= pre_s + ratio * est_total_s - lead_s:
+                        # Always have real audio in hand before connecting, even when the
+                        # speaker still has earlier audio queued.
+                        if finished or (pending and buffered_s >= pre_s + ratio * est_total_s - lead_s):
                             break
                         item = await next_item(None)
                         if item is None:
@@ -650,11 +659,13 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                         except asyncio.CancelledError:
                             if not device.interrupted.is_set():
                                 raise
-                        await gen.aclose()
+                        finally:
+                            await gen.aclose()
                     played = stats.frames_written * frame_s
                     if played and not device.interrupted.is_set():
                         # Playback starts at the first frame, not when the sentence ends.
-                        playback_end = max(playback_end, first_at) + played
+                        # The speaker also adds a short silence after each sentence.
+                        playback_end = max(playback_end, first_at) + played + DEVICE_SENTENCE_GAP_S
                     if not is_final and (sent or stats.frames_written):
                         sent_partial = True
                     log.info(f"SEND  [+{time.monotonic() - turn_t0:.2f}s] "

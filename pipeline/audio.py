@@ -79,6 +79,7 @@ class OpusStreamEncoder:
 
     def __init__(self, sample_rate: int = 16000, frame_size: int = 320):
         self._encoder = opuslib.Encoder(sample_rate, 1, opuslib.APPLICATION_VOIP)
+        self._sample_rate = sample_rate
         self.frame_size = frame_size
         self._frame_bytes = frame_size * 2  # 16-bit mono
         self._rest = b""
@@ -98,7 +99,10 @@ class OpusStreamEncoder:
         return [self._encoder.encode(chunk, self.frame_size)]
 
     def silence_frame(self) -> bytes:
-        return self._encoder.encode(b"\x00" * self._frame_bytes, self.frame_size)
+        """One frame of silence from a separate encoder. Encoding it on the
+        speech encoder would change that encoder's state mid-sentence, and the
+        next speech frame would then decode with a click."""
+        return opus_encode(b"\x00" * self._frame_bytes, self._sample_rate, self.frame_size)[0]
 
 
 def opus_frames_to_tcp_payload(opus_frames: list[bytes]) -> bytes:

@@ -174,6 +174,29 @@ class StreamedSendTests(unittest.IsolatedAsyncioTestCase):
 
         await self.run_pipeline(synth, check)
 
+    async def test_second_sentence_needs_no_prebuffer_while_first_still_plays(self):
+        calls = []
+
+        async def synth(env):
+            calls.append(env.emitted)
+            if len(calls) == 1:
+                yield PIECE * 10      # 2 s of audio, delivered at once
+            else:
+                for _ in range(4):    # slower than real time, in small bursts
+                    await asyncio.sleep(0.05)
+                    yield PIECE
+
+        async def check(dev, queue, env):
+            await asyncio.wait_for(queue.join(), 4)
+            # Sentence two connects on its first burst: the speaker still has
+            # sentence one queued, so no extra lead is held back.
+            self.assertEqual(env.opened, [1, 2])
+            # In order, complete, and with no silence added.
+            self.assertEqual(sum(n for _, n in env.writes), 140)
+            dev.conversation.commit.assert_called_once_with("One two three. Four five six.")
+
+        dev, env = await self.run_pipeline(synth, check, text="One two three. Four five six.")
+
     async def test_interruption_closes_upstream_and_socket(self):
         async def synth(env):
             yield PIECE * 3
@@ -203,7 +226,7 @@ class StreamedSendTests(unittest.IsolatedAsyncioTestCase):
             gate.await_follow_up.assert_called_once()
             lead = gate.await_follow_up.call_args.args[2]
             self.assertGreater(lead, 0.85)
-            self.assertLessEqual(lead, 1.0)
+            self.assertLessEqual(lead, 1.0 + 0.12)  # audio sent plus the speaker's end-of-sentence silence
 
         cfg = {**CONFIG, "wake_word": {"follow_up_window_s": 15}}
         await self.run_pipeline(synth, check, gate=gate, config=cfg)
