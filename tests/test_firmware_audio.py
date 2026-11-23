@@ -33,8 +33,26 @@ class FirmwareAudioTests(unittest.TestCase):
         connect = wifi[wifi.index("void connectDeviceWiFi()"):]
         self.assertEqual(connect.count("WiFi.setSleep(false);"), 2)
         sketch = (ROOT / "onjuino/onjuino.ino").read_text()
-        self.assertNotIn("static_cast<int16_t>(micBuffer[i] >> 14);\n                running_dc", sketch)
-        self.assertIn("if (centered > 32767) centered = 32767;", sketch)
+        self.assertNotIn("static_cast<int16_t>(micBuffer[i] >> 14)", sketch)
+        self.assertIn("mic_combine(&micCombiner, micBuffer", sketch)
+
+    def test_two_microphone_combiner_under_sanitizers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = str(Path(directory) / "mic-combine-test")
+            subprocess.run(["clang++", "-std=c++11", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                            str(ROOT / "tests/mic_combine_test.cpp"), "-o", binary],
+                           check=True, capture_output=True, text=True)
+            result = subprocess.run([binary], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS:", result.stdout)
+
+    def test_speaker_writes_fill_both_bus_slots(self):
+        sketch = (ROOT / "onjuino/onjuino.ino").read_text()
+        self.assertIn("I2S_CHANNEL_FMT_RIGHT_LEFT", sketch)
+        # Every speaker sample write goes through the mono-to-stereo helper.
+        self.assertEqual(sketch.count("i2s_write(I2S_NUM, (uint8_t *)wavData"), 0)
+        self.assertEqual(sketch.count("i2sWriteMono(wavData, totalSamplesRead);"), 2)
 
 
 if __name__ == "__main__":
