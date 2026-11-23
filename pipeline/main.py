@@ -18,6 +18,7 @@ import yaml
 
 from pipeline.audio import decode_ulaw, opus_encode, opus_frames_to_tcp_payload, pcm_to_wav
 from pipeline.conversation import create_backend, sentence_chunks
+from pipeline.local_wake import LocalSpeechWakeGate
 from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
 from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
@@ -395,7 +396,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
         device.processing = True
         device.interrupted.clear()
         wake_gate = getattr(device, "wake_gate", None)
-        wake_only = False
+        keep_gate_open = False
 
         try:
             # Safety: close any lingering LED connection before processing
@@ -418,7 +419,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     # A separate wake phrase opens one short local command
                     # window. Do not spend an agent turn answering the name.
                     wake_gate.arm(time.monotonic(), window_s=10)
-                    wake_only = True
+                    keep_gate_open = True
             nsp = asr_result.get("no_speech_prob")
 
             if not text or (nsp is not None and nsp > no_speech_threshold):
@@ -454,6 +455,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             opus_frame_size = config["audio"]["opus_frame_size"]
 
             turn_t0 = time.monotonic()
+            playback_end = turn_t0
             full_response: list[str] = []
             sent_partial = False           # any non-final chunk already sent?
             first_sentence_at: float | None = None
@@ -462,7 +464,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             async def send_sentence(sentence: str, is_final: bool) -> bool:
                 """Synthesize, encode, and push one sentence. Returns True on
                 success, False if interrupted or TTS failed."""
-                nonlocal sent_partial
+                nonlocal sent_partial, playback_end
                 if device.interrupted.is_set():
                     log.info(f"Interrupted before TTS")
                     return False
@@ -490,10 +492,13 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                 log.info(f"SEND  [+{time.monotonic() - turn_t0:.2f}s] "
                          f"{len(frames)} opus frames to {device.ip} "
                          f"({'final' if is_final else 'partial'}: {sentence!r})")
-                await send_audio(device.ip, tcp_port, payload,
+                sent = await send_audio(device.ip, tcp_port, payload,
                                  mic_timeout=mic_timeout,
                                  volume=dev_cfg["default_volume"],
                                  fade=dev_cfg["led_fade"])
+                if sent is False:
+                    return False
+                playback_end = max(playback_end, time.monotonic()) + len(pcm) / (2 * sample_rate)
                 if not is_final:
                     sent_partial = True
                 return True
@@ -590,13 +595,20 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             if not device.ptt:
                 # The stream is complete, including a possible trailing fragment.
                 # This final control message also covers an empty response.
-                await send_audio(device.ip, tcp_port, b"",
+                reopened = await send_audio(device.ip, tcp_port, b"",
                                  mic_timeout=dev_cfg["default_mic_timeout"],
                                  volume=0, fade=0)
 
             response_text = " ".join(full_response)
             if response_text:
                 device.conversation.commit(response_text)
+                window = config.get("wake_word", {}).get("follow_up_window_s", 0)
+                if (not device.ptt and reopened is True and window > 0
+                        and isinstance(wake_gate, LocalSpeechWakeGate)
+                        and not pilot.enabled and getattr(bridge, "mode", None) != "live"):
+                    now = time.monotonic()
+                    wake_gate.await_follow_up(now, window, max(0, playback_end - now))
+                    keep_gate_open = True
             device.last_response = response_text
             elapsed = time.monotonic() - turn_t0
             ttfs = f"{first_sentence_at - turn_t0:.2f}s" if first_sentence_at else "—"
@@ -615,7 +627,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     pass
         finally:
             device.processing = False
-            if wake_gate is not None and not wake_only:
+            if wake_gate is not None and not keep_gate_open:
                 wake_gate.reset()
             utterance_queue.task_done()
 

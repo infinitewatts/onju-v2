@@ -40,6 +40,7 @@ class LocalSpeechWakeGate:
         self.url = url + '/transcribe'
         idle_config = copy.deepcopy(config)
         idle_config['vad']['silence_time'] = .35
+        idle_config['vad'].pop('short_speech_pause_s', None)
         self.vad = vad if vad is not None else VAD(idle_config)
         self._recognize = recognize or self._request
         self._task = None
@@ -49,6 +50,7 @@ class LocalSpeechWakeGate:
         self._last_feed = None
         self.active = False
         self.just_activated = False
+        self._follow_up_window = 0
         self._deadline = 0
         self._command_started = False
         self.frames_seen = self.detections = self.checks = self.failures = 0
@@ -86,6 +88,7 @@ class LocalSpeechWakeGate:
         self._pending.clear()
         self.vad.reset()
         self.vad.pre_buffer.clear()
+        self._follow_up_window = 0
         self.active = self.just_activated = False
         self._command_started = False
         self._last_feed = None
@@ -100,6 +103,13 @@ class LocalSpeechWakeGate:
         self.active = True
         self._deadline = now + min(window_s, 10)
         self._last_feed = now
+
+    def await_follow_up(self, now, window_s, playback_remaining_s):
+        """Start the answer timer on resumed mic audio, with bounded playback grace."""
+        self.reset()
+        self.active = True
+        self._follow_up_window = min(window_s, 30)
+        self._deadline = now + min(playback_remaining_s, 60) + self._follow_up_window
 
     def begin_command(self, now):
         if self.active and not self._command_started:
@@ -118,6 +128,9 @@ class LocalSpeechWakeGate:
                 self.reset('gap')
         if self.active and now >= self._deadline:
             self.reset('expiry')
+        if self._follow_up_window:
+            self._deadline = min(self._deadline, now + self._follow_up_window)
+            self._follow_up_window = 0
         self._last_feed = now
         if self.active:
             return [pcm]

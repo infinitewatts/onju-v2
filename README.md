@@ -129,6 +129,15 @@ These diagnostics retain neither microphone samples nor recognized speech.
   Say "Hey Aiden", wait for the blue light, then ask your question within ten
   seconds; saying the name and question together also works. The gate closes
   after one command, with a maximum 30-second capture once speech starts.
+  With the Mini template, a successful ordinary spoken reply opens a 15-second
+  window for one follow-up without repeating the wake phrase. The window
+  starts on returning microphone audio and renews after each successful reply.
+  After less than a second of speech (such as “uh”), the Mini allows a
+  three-second pause for the speaker to continue. Longer utterances retain
+  the usual 1.5-second end pause.
+  Anyone within earshot can answer during that window. Set
+  `wake_word.follow_up_window_s` to zero to require the phrase every turn.
+  The live Orchestrator bridge and voice pilot retain explicit wake admission.
   Physical mute still stops microphone delivery.
   This recognizes a phrase, not a particular person: anyone nearby can activate
   it. The firmware suppresses its microphone during speaker playback.

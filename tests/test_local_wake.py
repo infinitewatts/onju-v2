@@ -5,6 +5,7 @@ from unittest.mock import Mock, AsyncMock, patch
 
 import numpy as np
 
+from pipeline.vad import VAD
 from pipeline.local_wake import LocalSpeechWakeGate, wake_match
 
 CONFIG = {'asr': {'url': 'http://127.0.0.1:8100'},
@@ -105,6 +106,22 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gate.feed(a, .032), [])
         self.assertFalse(gate.active)
 
+    async def test_follow_up_starts_on_first_mic_frame_and_expires(self):
+        gate, _, recognize = self.make()
+        frame = np.zeros(512, dtype=np.int16)
+        gate.await_follow_up(0, 15, 8)
+        for now in range(8, 23):
+            self.assertTrue(gate.feed(frame, now))
+        self.assertEqual(gate.feed(frame, 23), [])
+        self.assertFalse(gate.active)
+        recognize.assert_not_awaited()
+
+    async def test_disconnected_mic_cannot_open_stale_follow_up(self):
+        gate, _, _ = self.make()
+        gate.await_follow_up(0, 15, 8)
+        self.assertEqual(gate.feed(np.zeros(512, dtype=np.int16), 24), [])
+        self.assertFalse(gate.active)
+
     async def test_command_start_extends_once_but_stays_bounded(self):
         gate, _, _ = self.make()
         gate.arm(0)
@@ -188,3 +205,16 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
                     'http://127.0.0.1:8100/path', 'http://user@127.0.0.1:8100']:
             with self.assertRaises(ValueError):
                 LocalSpeechWakeGate(dict(CONFIG, asr={'url': url}), vad=Mock())
+
+class ConversationPauseTests(unittest.TestCase):
+    def test_short_filler_then_answer_is_one_turn(self):
+        with patch("pipeline.vad._load_silero_onnx") as load:
+            vad = VAD({"audio": {"sample_rate": 16000, "chunk_size": 512},
+                       "vad": {"threshold": .5, "neg_threshold": .35, "silence_time": 1.5,
+                               "short_speech_pause_s": 3, "pre_buffer_s": 1}})
+        frame = np.zeros(512, dtype=np.int16)
+        for prob, count in [(1, 10), (0, 70), (1, 40), (0, 46)]:
+            load.return_value.run.return_value = np.array([[prob]]), vad._state
+            for _ in range(count):
+                self.assertIsNone(vad.process_frame(frame))
+        self.assertEqual(len(vad.process_frame(frame)), (10 + 70 + 40 + 47) * 512)
