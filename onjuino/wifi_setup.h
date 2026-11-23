@@ -196,11 +196,14 @@ void connectDeviceWiFi() {
     store.begin("onju-wifi", false);
     const bool forced = store.getBool("setup", false);
     store.remove("setup"); store.end();
-    if (forced && phoneSetup()) { networkSetupActive = false; WiFi.setAutoReconnect(true); return; }
+    if (forced && phoneSetup()) { networkSetupActive = false; WiFi.setSleep(false); WiFi.setAutoReconnect(true); return; }
     while (!connectSavedNetworks()) {
         if (phoneSetup()) break;
         delay(1000);
     }
+    // Mains powered: keep the radio awake. Modem sleep stalls the 32 ms mic
+    // packets past the 128 ms I2S buffer, which drops microphone audio.
+    WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     networkSetupActive = false;
 }
