@@ -25,6 +25,9 @@
 #include "custom_boards.h"
 #include "credentials.h"
 #include "audio_compression.h"
+#include "mic_combine.h"
+
+MicCombiner micCombiner; // two-microphone state; announcePresence reports its health numbers
 
 #define TOUCH_EN
 // The mute switch is connected in this assembled Nest Mini.
@@ -78,6 +81,10 @@ void announcePresence() {
     udp.beginPacket(IPAddress(239, 0, 0, 1), 12345);
     String message = String(WiFi.getHostname()) + " " + String(GIT_HASH);
     if (PTT_MODE) message += " PTT";
+    // Microphone health, numbers only: mode (0 both, 1 first only, 2 second only),
+    // each microphone's smoothed level, and the alignment delay in samples.
+    message += " mic=" + String((int)micCombiner.mode) + "," + String((int)micCombiner.level[0]) + "," +
+               String((int)micCombiner.level[1]) + "," + String(micCombiner.lag);
     udp.write(reinterpret_cast<const uint8_t *>(message.c_str()), message.length());
     udp.endPacket();
     lastAnnouncement = millis();
@@ -132,11 +139,12 @@ int bufferThreshold = 1024;  // 64ms @ 16kHz (3.2 frames @ 20ms)
 
 // Mic settings
 #define SAMPLE_CHUNK_SIZE 512                  // 32ms at 16kHz for Silero VAD, fits in UDP packet (512 bytes μ-law < 1400)
-int32_t micBuffer[SAMPLE_CHUNK_SIZE];          // For raw values from I2S
+#define MIC_CHANNELS 2                          // two SPH0645 mics share the I2S data line (left/right slots)
+int32_t micBuffer[SAMPLE_CHUNK_SIZE * MIC_CHANNELS]; // Raw interleaved values from I2S
+int16_t micWork[2 * (MIC_MAX_LAG + SAMPLE_CHUNK_SIZE)]; // Per-mic scratch for the combiner
 int16_t convertedMicBuffer[SAMPLE_CHUNK_SIZE]; // For converted values to be sent over UDP
 
 #define MAX_ALLOWED_OFFSET 16000
-#define MIC_OFFSET_AVERAGING_FRAMES 1
 #define DC_OFFSET_ALPHA 0.001f // IIR filter coefficient for DC offset tracking
 #define VAD_MIC_EXTEND 5000 // ensure there's always another 5s after last VAD detected by server to avoid cutting off while talking
 
@@ -163,11 +171,33 @@ i2s_config_t i2s_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
     .sample_rate = 16000,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT, // both slots: second microphone is on the other slot
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = SAMPLE_CHUNK_SIZE}; // mostly set by needs of microphone
+    // Stereo 32-bit frames are 8 bytes and one DMA buffer holds at most 4092
+    // bytes, so use twice as many half-length buffers (same total as before).
+    .dma_buf_count = 8,
+    .dma_buf_len = SAMPLE_CHUNK_SIZE / 2};
+
+// The speaker path produces mono samples; the bus now carries two slots.
+// Put the same sample in both so the amplifier plays it whichever slot it uses.
+int32_t stereoOut[2 * 256];
+void i2sWriteMono(const int32_t *samples, size_t count)
+{
+    while (count > 0)
+    {
+        size_t n = count > 256 ? 256 : count;
+        for (size_t i = 0; i < n; i++)
+        {
+            stereoOut[2 * i] = samples[i];
+            stereoOut[2 * i + 1] = samples[i];
+        }
+        size_t written = 0;
+        i2s_write(I2S_NUM, stereoOut, n * 8, &written, portMAX_DELAY);
+        samples += n;
+        count -= n;
+    }
+}
 
 i2s_pin_config_t pin_config = {
     .bck_io_num = I2S_BCK_PIN,
@@ -659,10 +689,7 @@ void loop()
                                     initialBufferFilled = true;
                                 }
 
-                                bytesToWrite = totalSamplesRead * 4;
-                                bytesWritten = 0;
-
-                                i2s_write(I2S_NUM, (uint8_t *)wavData, bytesToWrite, &bytesWritten, portMAX_DELAY);
+                                i2sWriteMono(wavData, totalSamplesRead);
 
                                 if (millis() - tic > 30)
                                 {
@@ -713,7 +740,7 @@ void loop()
                 {
                     uint32_t silenceBuffer[240];
                     memset(silenceBuffer, 0, sizeof(silenceBuffer));
-                    for (int i = 0; i < 8; i++)
+                    for (int i = 0; i < 16; i++) // stereo frames: twice the writes for the same 120 ms
                     {
                         size_t bytesWritten = 0;
                         i2s_write(I2S_NUM, silenceBuffer, sizeof(silenceBuffer), &bytesWritten, portMAX_DELAY);
@@ -922,9 +949,7 @@ void opusDecodeTask(void *pvParameters)
                 initialBufferFilled = true;
             }
 
-            size_t bytesToWrite = totalSamplesRead * 4; // int32_t
-            size_t bytesWritten = 0;
-            i2s_write(I2S_NUM, (uint8_t *)wavData, bytesToWrite, &bytesWritten, portMAX_DELAY);
+            i2sWriteMono(wavData, totalSamplesRead);
 
             if (millis() - tic > 30)
             {
@@ -955,31 +980,21 @@ void micTask(void *pvParameters)
 {
     Serial.println("Mic task initialized, calculating initial offset... [currently not used]");
 
-    int64_t sum = 0;
-    int16_t shifted_value = 0;
-
-    for (int i = 0; i < MIC_OFFSET_AVERAGING_FRAMES; i++)
+    // Starting DC estimate for each microphone from one block.
+    int64_t sum[MIC_CHANNELS] = {0, 0};
+    size_t startRead = 0;
+    i2s_read(I2S_NUM, micBuffer, sizeof(micBuffer), &startRead, portMAX_DELAY);
+    for (int i = 0; i < SAMPLE_CHUNK_SIZE * MIC_CHANNELS; i++)
+        sum[i % MIC_CHANNELS] += micBuffer[i] >> 14;
+    float startOffset[MIC_CHANNELS];
+    for (int c = 0; c < MIC_CHANNELS; c++)
     {
-        size_t bytesRead = 0;
-        i2s_read(I2S_NUM, micBuffer, sizeof(micBuffer), &bytesRead, portMAX_DELAY);
-        for (int i = 0; i < sizeof(micBuffer) / sizeof(micBuffer[0]); i++)
-        {
-            shifted_value = static_cast<int16_t>(micBuffer[i] >> 14);
-            sum += shifted_value;
-        }
-        Serial.println(shifted_value);
+        startOffset[c] = (float)(sum[c] / SAMPLE_CHUNK_SIZE);
+        if (fabsf(startOffset[c]) > MAX_ALLOWED_OFFSET) startOffset[c] = 0;
     }
-    int16_t offset = sum / (sizeof(micBuffer) / sizeof(micBuffer[0])) / MIC_OFFSET_AVERAGING_FRAMES;
-
-    Serial.println("Calculated mic offset: " + String(offset));
+    mic_combiner_init(&micCombiner, startOffset[0], startOffset[1]);
+    Serial.println("Mic offsets: " + String(startOffset[0]) + " / " + String(startOffset[1]));
     Serial.println("Device: " + String(WiFi.getHostname()) + " @ " + WiFi.localIP().toString() + " (" + String(GIT_HASH) + ")");
-    if (abs(offset) > MAX_ALLOWED_OFFSET)
-    {
-        Serial.println("Calculated offset of is too large, using zero!");
-        offset = 0;
-    }
-
-    float running_dc = (float)offset; // IIR DC offset tracker
 
     int counter = 0;
     bool prevState = false;
@@ -1007,18 +1022,9 @@ void micTask(void *pvParameters)
             size_t bytesRead = 0;
             i2s_read(I2S_NUM, micBuffer, sizeof(micBuffer), &bytesRead, portMAX_DELAY);
 
-            // Convert to 16-bit and remove DC offset with IIR filter
-            for (int i = 0; i < SAMPLE_CHUNK_SIZE; i++)
-            {
-                // 18-bit mic sample: remove DC in 32 bits, then saturate. A bare
-                // int16 cast wraps loud speech into noise instead of clipping it.
-                int32_t sample = micBuffer[i] >> 14;
-                running_dc += DC_OFFSET_ALPHA * (sample - running_dc);
-                int32_t centered = sample - (int32_t)running_dc;
-                if (centered > 32767) centered = 32767;
-                else if (centered < -32768) centered = -32768;
-                convertedMicBuffer[i] = (int16_t)centered;
-            }
+            // Remove DC per microphone, line the two up and average them
+            // (falls back to one microphone if the other is dead).
+            mic_combine(&micCombiner, micBuffer, SAMPLE_CHUNK_SIZE, micWork, convertedMicBuffer, DC_OFFSET_ALPHA);
 
             // Transmit audio
             counter++;
