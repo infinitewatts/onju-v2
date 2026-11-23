@@ -16,13 +16,13 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 import numpy as np
 import yaml
 
-from pipeline.audio import decode_ulaw, opus_encode, opus_frames_to_tcp_payload, pcm_to_wav
+from pipeline.audio import OpusStreamEncoder, decode_ulaw, opus_encode, opus_frames_to_tcp_payload, pcm_to_wav
 from pipeline.conversation import create_backend, sentence_chunks
 from pipeline.local_wake import LocalSpeechWakeGate
 from pipeline.wake_phrase import strip_wake_prefix
 from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
-from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
+from pipeline.protocol import StreamStats, send_audio, send_audio_stream, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
 from pipeline.services import asr, tts
 from pipeline.security import validate_device
 from pipeline.voice_pilot import PilotError, VoicePilot, QUESTION
@@ -376,6 +376,10 @@ async def interruptible_sentences(device, text, extra_context):
         await asyncio.gather(interrupted, return_exceptions=True)
 
 
+STREAM_GAP_S = 0.3           # no audio for this long: send silence instead
+STREAM_SILENCE_CAP_S = 3.0   # max silence inserted per sentence
+
+
 async def process_utterances(config: dict, manager: DeviceManager, utterance_queue: asyncio.Queue,
                              pilot: VoicePilot | None = None, bridge=None):
     """Process complete utterances: ASR -> Conversation -> TTS -> Opus -> TCP."""
@@ -462,6 +466,11 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
             stream_start_at: float | None = None
 
             async def send_sentence(sentence: str, is_final: bool) -> bool:
+                if use_stream:
+                    return await send_sentence_stream(sentence, is_final)
+                return await send_sentence_plain(sentence, is_final)
+
+            async def send_sentence_plain(sentence: str, is_final: bool) -> bool:
                 """Synthesize, encode, and push one sentence. Returns True on
                 success, False if interrupted or TTS failed."""
                 nonlocal sent_partial, playback_end
@@ -502,6 +511,157 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                 if not is_final:
                     sent_partial = True
                 return True
+
+            local_tts = (config.get("tts") or {}).get("local") or {}
+            use_stream = (config.get("tts") or {}).get("backend") == "local" and bool(local_tts.get("stream"))
+
+            async def send_sentence_stream(sentence: str, is_final: bool) -> bool:
+                """Streamed variant of send_sentence: connect once enough audio
+                is buffered, then forward frames as synthesis produces them,
+                filling gaps with silent frames."""
+                nonlocal sent_partial, playback_end
+                if device.interrupted.is_set():
+                    log.info("Interrupted before TTS")
+                    return False
+                t0 = time.monotonic()
+                frame_s = opus_frame_size / sample_rate
+                pre_s = float(local_tts.get("stream_prebuffer_s", 0.4))
+                ratio = float(local_tts.get("stream_prebuffer_ratio", 0.15))
+                per_char = float(local_tts.get("stream_seconds_per_char", 0.058))
+                est_total_s = per_char * len(sentence)
+                encoder = OpusStreamEncoder(sample_rate, opus_frame_size)
+                queue: asyncio.Queue = asyncio.Queue()
+                done_mark, fail_mark = object(), object()
+
+                async def produce():
+                    try:
+                        async with aclosing(tts.synthesize_stream(sentence, device.voice, config)) as pieces:
+                            async for pcm in pieces:
+                                frames = encoder.encode(pcm)
+                                if frames:
+                                    queue.put_nowait(frames)
+                        tail = encoder.flush()
+                        if tail:
+                            queue.put_nowait(tail)
+                        queue.put_nowait(done_mark)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.error(f"TTS  failed: {e}")
+                        queue.put_nowait(fail_mark)
+
+                producer = asyncio.create_task(produce())
+                interrupted = asyncio.create_task(device.interrupted.wait())
+                timeout_mark = object()
+
+                async def next_item(timeout):
+                    """Next queue item, timeout_mark, or None when interrupted.
+                    Times out on the queue, never on the generator."""
+                    getter = asyncio.create_task(queue.get())
+                    await asyncio.wait((getter, interrupted), timeout=timeout,
+                                       return_when=asyncio.FIRST_COMPLETED)
+                    if interrupted.done():
+                        getter.cancel()
+                        await asyncio.gather(getter, return_exceptions=True)
+                        return None
+                    if not getter.done():
+                        getter.cancel()
+                        await asyncio.gather(getter, return_exceptions=True)
+                        if getter.done() and not getter.cancelled():
+                            return getter.result()
+                        return timeout_mark
+                    return getter.result()
+
+                silence_frames = 0
+                first_at: float | None = None
+                capped = failed = False
+                stats = StreamStats()
+                try:
+                    # Prebuffer, then connect.
+                    pending: list[bytes] = []
+                    finished = False
+                    while True:
+                        buffered_s = len(pending) * frame_s
+                        lead_s = max(0.0, playback_end - time.monotonic())
+                        if finished or buffered_s >= pre_s + ratio * est_total_s - lead_s:
+                            break
+                        item = await next_item(None)
+                        if item is None:
+                            log.info("Interrupted before send")
+                            return False
+                        if item is fail_mark:
+                            return False
+                        if item is done_mark:
+                            finished = True
+                        else:
+                            pending.extend(item)
+                    if device.interrupted.is_set():
+                        log.info("Interrupted before send")
+                        return False
+
+                    silence = encoder.silence_frame()
+                    gap_frames = max(1, round(STREAM_GAP_S / frame_s))
+
+                    async def batches():
+                        nonlocal silence_frames, first_at, capped, failed, finished
+                        first_at = time.monotonic()
+                        yield pending
+                        while not finished:
+                            item = await next_item(STREAM_GAP_S)
+                            if item is None or item is done_mark:
+                                return
+                            if item is fail_mark:
+                                failed = True
+                                return
+                            if item is timeout_mark:
+                                if (silence_frames + gap_frames) * frame_s > STREAM_SILENCE_CAP_S:
+                                    capped = True
+                                    return
+                                silence_frames += gap_frames
+                                yield [silence] * gap_frames
+                            else:
+                                yield item
+
+                    mic_timeout = dev_cfg["default_mic_timeout"] if is_final else 0
+                    gen = batches()
+                    send_task = asyncio.create_task(send_audio_stream(
+                        device.ip, tcp_port, gen, mic_timeout=mic_timeout,
+                        volume=dev_cfg["default_volume"], fade=dev_cfg["led_fade"],
+                        stats=stats))
+                    try:
+                        await asyncio.wait((send_task, interrupted),
+                                           return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        if not send_task.done():
+                            send_task.cancel()
+                        sent = False
+                        try:
+                            sent = await send_task
+                        except asyncio.CancelledError:
+                            if not device.interrupted.is_set():
+                                raise
+                        await gen.aclose()
+                    played = stats.frames_written * frame_s
+                    if played and not device.interrupted.is_set():
+                        # Playback starts at the first frame, not when the sentence ends.
+                        playback_end = max(playback_end, first_at) + played
+                    if not is_final and (sent or stats.frames_written):
+                        sent_partial = True
+                    log.info(f"SEND  [+{time.monotonic() - turn_t0:.2f}s] "
+                             f"{stats.frames_written} opus frames to {device.ip} "
+                             f"({'final' if is_final else 'partial'}: {sentence!r}) "
+                             f"first_frame +{(first_at or t0) - t0:.2f}s "
+                             f"silence_frames {silence_frames}")
+                    if device.interrupted.is_set():
+                        log.info("Interrupted during send")
+                        return False
+                    if capped:
+                        log.error("TTS  stalled: silence cap reached")
+                    return bool(sent) and not capped and not failed
+                finally:
+                    producer.cancel()
+                    interrupted.cancel()
+                    await asyncio.gather(producer, interrupted, return_exceptions=True)
 
             async def reopen_mic_if_needed():
                 """If we already sent partial audio with mic_timeout=0, the mic

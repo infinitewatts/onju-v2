@@ -118,6 +118,13 @@ tts:
     model: "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit"
     ref_audio: ""
     ref_text: ""
+    # Streamed speech: start playing while the sentence is still being generated.
+    # Needs a TTS server that accepts "stream": true / "streaming_interval".
+    stream: false
+    streaming_interval: 0.4                  # seconds of audio per streamed piece
+    stream_prebuffer_s: 0.4                  # audio to buffer before connecting
+    stream_prebuffer_ratio: 0.15             # plus this share of the estimated sentence length
+    stream_seconds_per_char: 0.058           # speech length estimate per character
   elevenlabs:
     api_key: ""                              # your ElevenLabs API key
     default_voice: "Archer"

@@ -74,6 +74,33 @@ def opus_encode(pcm_data: bytes, sample_rate: int = 16000, frame_size: int = 320
     return frames
 
 
+class OpusStreamEncoder:
+    """Incremental Opus encoder: one encoder, partial frame kept between calls."""
+
+    def __init__(self, sample_rate: int = 16000, frame_size: int = 320):
+        self._encoder = opuslib.Encoder(sample_rate, 1, opuslib.APPLICATION_VOIP)
+        self.frame_size = frame_size
+        self._frame_bytes = frame_size * 2  # 16-bit mono
+        self._rest = b""
+
+    def encode(self, pcm_bytes: bytes) -> list[bytes]:
+        data = self._rest + pcm_bytes
+        usable = len(data) - len(data) % self._frame_bytes
+        self._rest = data[usable:]
+        return [self._encoder.encode(data[i:i + self._frame_bytes], self.frame_size)
+                for i in range(0, usable, self._frame_bytes)]
+
+    def flush(self) -> list[bytes]:
+        if not self._rest:
+            return []
+        chunk = self._rest + b"\x00" * (self._frame_bytes - len(self._rest))
+        self._rest = b""
+        return [self._encoder.encode(chunk, self.frame_size)]
+
+    def silence_frame(self) -> bytes:
+        return self._encoder.encode(b"\x00" * self._frame_bytes, self.frame_size)
+
+
 def opus_frames_to_tcp_payload(opus_frames: list[bytes]) -> bytes:
     parts = []
     for frame in opus_frames:
