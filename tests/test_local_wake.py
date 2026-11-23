@@ -209,7 +209,8 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
     def test_every_admitted_spelling_is_stripped_before_routing(self):
         from pipeline.wake_phrase import strip_wake_prefix
         for text in ['Hey Aiden, option one', 'Hey Aidan, option one', 'hay ayden option one',
-                     'Aden: option one', 'Hey Aidyn - option one']:
+                     'Aden: option one', 'Hey Aidyn - option one', 'Hey. Aiden, option one',
+                     'Hey-Aiden option one', 'hey! aiden option one']:
             self.assertTrue(wake_match(text)[0] or text.startswith('Aden'), text)
             self.assertEqual(strip_wake_prefix(text), 'option one', text)
         self.assertEqual(strip_wake_prefix('Hey Aidan!'), '')

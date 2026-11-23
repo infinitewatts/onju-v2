@@ -80,7 +80,8 @@ class StateTests(unittest.TestCase):
 
     def test_choice_is_fixed_and_raw_speech_is_not_retained(self):
         for text, choice in (("Hey, Aiden: option one!", 1), ("Hey Aidan, option one", 1),
-                             ("hay ayden two", 2), ("one.", 1), ("1", 1),
+                             ("hay ayden two", 2), ("Hey. Aiden, option one", 1),
+                             ("Hey-Aiden two", 2), ("hey! aiden blue", 1), ("one.", 1), ("1", 1),
                              ("BLUE!", 1), ("option two?", 2), ("two", 2), ("green.", 2)):
             with self.subTest(text=text):
                 self.pilot.records.clear()

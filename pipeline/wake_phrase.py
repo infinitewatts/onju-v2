@@ -8,7 +8,7 @@ import re
 # Spellings the recognizer uses for the same two sounds; no other names.
 GREETING = r"(?:hey|hay)"
 NAME = r"(?:aiden|aidan|ayden|aydan|aidyn|aydin|aden)"
-_COMMAND_PREFIX = re.compile(rf"^\s*(?:{GREETING}[\s,]+)?{NAME}\b[\s,.!?;:-]*", re.IGNORECASE)
+_COMMAND_PREFIX = re.compile(rf"^\s*(?:{GREETING}[\s,.!?:;-]+)?{NAME}\b[\s,.!?;:-]*", re.IGNORECASE)
 
 
 def strip_wake_prefix(text):
