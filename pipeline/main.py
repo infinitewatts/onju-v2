@@ -660,7 +660,10 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                             if not device.interrupted.is_set():
                                 raise
                         finally:
-                            await gen.aclose()
+                            try:
+                                await gen.aclose()
+                            except RuntimeError:
+                                pass  # still running after a second cancel; it ends with the task
                     played = stats.frames_written * frame_s
                     if played and not device.interrupted.is_set():
                         # Playback starts at the first frame, not when the sentence ends.
