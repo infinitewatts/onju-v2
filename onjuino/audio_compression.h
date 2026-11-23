@@ -8,7 +8,8 @@
 // Stateless - each sample is independent
 
 #define MULAW_BIAS 0x84
-#define MULAW_MAX 0x1FFF
+// Full 16-bit range. The old 0x1FFF ceiling clipped speech 12 dB early.
+#define MULAW_MAX 32635
 
 static const int16_t exp_lut[256] = {
     -32124,-31100,-30076,-29052,-28028,-27004,-25980,-24956,
@@ -46,16 +47,17 @@ static const int16_t exp_lut[256] = {
 };
 
 inline uint8_t linear_to_ulaw(int16_t pcm_val) {
-    int16_t sign = (pcm_val < 0) ? 0x80 : 0;
-    if (sign) pcm_val = -pcm_val;
-    if (pcm_val > MULAW_MAX) pcm_val = MULAW_MAX;
+    int32_t magnitude = pcm_val;  // 32-bit so -32768 negates safely
+    int32_t sign = (magnitude < 0) ? 0x80 : 0;
+    if (sign) magnitude = -magnitude;
+    if (magnitude > MULAW_MAX) magnitude = MULAW_MAX;
 
-    pcm_val += MULAW_BIAS;
-    int16_t exponent = 7;
+    magnitude += MULAW_BIAS;
+    int32_t exponent = 7;
 
-    for (int16_t exp_mask = 0x4000; (pcm_val & exp_mask) == 0 && exponent > 0; exp_mask >>= 1, exponent--);
+    for (int32_t exp_mask = 0x4000; (magnitude & exp_mask) == 0 && exponent > 0; exp_mask >>= 1, exponent--);
 
-    int16_t mantissa = (pcm_val >> (exponent + 3)) & 0x0F;
+    int32_t mantissa = (magnitude >> (exponent + 3)) & 0x0F;
     uint8_t ulaw_byte = ~(sign | (exponent << 4) | mantissa);
 
     return ulaw_byte;

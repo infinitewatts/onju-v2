@@ -1010,9 +1010,14 @@ void micTask(void *pvParameters)
             // Convert to 16-bit and remove DC offset with IIR filter
             for (int i = 0; i < SAMPLE_CHUNK_SIZE; i++)
             {
-                int16_t sample = static_cast<int16_t>(micBuffer[i] >> 14);
+                // 18-bit mic sample: remove DC in 32 bits, then saturate. A bare
+                // int16 cast wraps loud speech into noise instead of clipping it.
+                int32_t sample = micBuffer[i] >> 14;
                 running_dc += DC_OFFSET_ALPHA * (sample - running_dc);
-                convertedMicBuffer[i] = sample - (int16_t)running_dc;
+                int32_t centered = sample - (int32_t)running_dc;
+                if (centered > 32767) centered = 32767;
+                else if (centered < -32768) centered = -32768;
+                convertedMicBuffer[i] = (int16_t)centered;
             }
 
             // Transmit audio
