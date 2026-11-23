@@ -41,6 +41,7 @@ class Device:
         self.last_audio_at = None
         self.audio_rms = 0.0
         self.peak_audio_rms = 0.0
+        self._rate_slot, self._rate_count, self._rate_last = None, 0, (None, 0)
         self.wake_gate = None
         if config.get("wake_word", {}).get("enabled") and not ptt:
             backend = config['wake_word'].get('backend', 'keyword')
@@ -57,6 +58,13 @@ class Device:
         """Keep level/counter metadata only, never microphone samples or text."""
         self.audio_frames += 1
         self.last_audio_at = time.monotonic()
+        # Frames per ten-second slot: 312 expected while the mic streams, so a
+        # shortfall while idle shows microphone audio lost before it arrived.
+        slot = int(self.last_audio_at // 10)
+        if slot != self._rate_slot:
+            self._rate_last = (self._rate_slot, self._rate_count)
+            self._rate_slot, self._rate_count = slot, 0
+        self._rate_count += 1
         self.audio_rms = float(np.sqrt(np.mean(np.square(pcm.astype(np.float32)))))
         self.peak_audio_rms = max(self.peak_audio_rms, self.audio_rms)
 
@@ -76,6 +84,9 @@ class Device:
                                      if self.last_audio_at is not None else None),
                 "audio_rms": round(self.audio_rms, 1),
                 "peak_audio_rms": round(self.peak_audio_rms, 1),
+                "audio_frames_prior_10s": (self._rate_last[1] if self.last_audio_at is not None
+                                           and self._rate_last[0] == int(time.monotonic() // 10) - 1
+                                           else 0),
                 "wake_frames": getattr(self.wake_gate, "frames_seen", None),
                 "wake_model_profile": getattr(self.wake_gate, "model_profile", None),
                 "wake_detections": getattr(self.wake_gate, "detections", None),
@@ -83,6 +94,7 @@ class Device:
                 "wake_failures": getattr(self.wake_gate, "failures", None),
                 "wake_max_feed_gap_s": getattr(self.wake_gate, "max_feed_gap_s", None),
                 "wake_resets": getattr(self.wake_gate, "reset_counts", None),
+                "wake_misses": getattr(self.wake_gate, "miss_counts", None),
             },
         }
 

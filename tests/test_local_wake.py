@@ -6,7 +6,7 @@ from unittest.mock import Mock, AsyncMock, patch
 import numpy as np
 
 from pipeline.vad import VAD
-from pipeline.local_wake import LocalSpeechWakeGate, wake_match
+from pipeline.local_wake import LocalSpeechWakeGate, miss_reason, wake_match
 
 CONFIG = {'asr': {'url': 'http://127.0.0.1:8100'},
           'vad': {'silence_time': 1.5}, 'audio': {}}
@@ -199,6 +199,39 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
         for text in ['Aiden', 'Hey Adrian', 'Harry Aiden', 'Do not say Hey Aiden',
                      'I spoke with Aiden', 'Hey Aidens', 'Hey', None]:
             self.assertEqual(wake_match(text), (False, False), text)
+
+    def test_same_sound_spellings_match_but_other_names_do_not(self):
+        for text in ['Hey Aidan', 'Hay Aiden, lights', 'hey ayden', 'Hey Aden.', 'hey aidyn what time']:
+            self.assertTrue(wake_match(text)[0], text)
+        for text in ['Hey Eden', 'Hey Hayden', 'Hi Aiden', 'Hey Adrian', 'Hey Aidens', 'Okay Aiden']:
+            self.assertEqual(wake_match(text), (False, False), text)
+
+    def test_miss_reason_is_a_fixed_label(self):
+        cases = {None: 'no_text', '  ': 'no_text', 'Hey': 'greeting_only', 'hay.': 'greeting_only',
+                 'Hey Adrian': 'greeting_other_word', 'Harry Aiden': 'name_not_first',
+                 'so I said hey Aidan': 'name_not_first', 'turn the lights off': 'other_speech'}
+        for text, reason in cases.items():
+            self.assertEqual(miss_reason(text), reason, text)
+
+    async def test_rejected_segment_counts_reason_and_keeps_no_words(self):
+        gate, _, _ = self.make()
+        response = Mock()
+        response.json.return_value = {'text': 'Hey Adrian private words'}
+        client = AsyncMock()
+        client.post.return_value = response
+        context = AsyncMock()
+        context.__aenter__.return_value = client
+        with patch('pipeline.local_wake.httpx.AsyncClient', return_value=context), \
+                self.assertNoLogs(level='DEBUG'):
+            result = await gate._request(np.zeros(512, dtype=np.int16))
+        self.assertEqual(result, (False, False))
+        self.assertEqual(gate.miss_counts['greeting_other_word'], 1)
+        self.assertEqual(sum(gate.miss_counts.values()), 1)
+        self.assertFalse(any(isinstance(v, str) and 'private' in v for v in vars(gate).values()))
+        response.json.return_value = {'text': 'Hey Aidan'}
+        with patch('pipeline.local_wake.httpx.AsyncClient', return_value=context):
+            self.assertEqual(await gate._request(np.zeros(512, dtype=np.int16)), (True, False))
+        self.assertEqual(sum(gate.miss_counts.values()), 1)
 
     def test_nonlocal_endpoint_rejected(self):
         for url in ['https://example.com', 'http://localhost:8100',

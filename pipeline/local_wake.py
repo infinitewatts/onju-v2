@@ -14,7 +14,13 @@ import numpy as np
 from pipeline.audio import pcm_to_wav
 from pipeline.vad import VAD
 
-_PREFIX = re.compile(r"^\s*hey[\s,.!?:;-]+aiden\b[\s,.!?:;-]*", re.IGNORECASE)
+# Spellings the recognizer uses for the same two sounds; no other names.
+_GREETING = r"(?:hey|hay)"
+_NAME = r"(?:aiden|aidan|ayden|aydan|aidyn|aydin|aden)"
+_PREFIX = re.compile(rf"^\s*{_GREETING}[\s,.!?:;-]+{_NAME}\b[\s,.!?:;-]*", re.IGNORECASE)
+_GREETING_FIRST = re.compile(rf"^\s*{_GREETING}\b[\s,.!?:;-]*(.*)$", re.IGNORECASE | re.DOTALL)
+_NAME_ANYWHERE = re.compile(rf"\b{_NAME}\b", re.IGNORECASE)
+MISS_REASONS = ('no_text', 'greeting_only', 'greeting_other_word', 'name_not_first', 'other_speech')
 _RATE = 16000
 _FRAME = 512
 _MAX_FRAMES = 125  # Four seconds, including prebuffer; never an unbounded queue.
@@ -25,6 +31,16 @@ def wake_match(text):
         return False, False
     match = _PREFIX.match(text)
     return (True, bool(text[match.end():].strip())) if match else (False, False)
+
+
+def miss_reason(text):
+    """Why a rejected segment missed, as a fixed label. Never returns the words."""
+    if not isinstance(text, str) or not text.strip():
+        return 'no_text'
+    greeting = _GREETING_FIRST.match(text)
+    if greeting:
+        return 'greeting_other_word' if greeting.group(1).strip() else 'greeting_only'
+    return 'name_not_first' if _NAME_ANYWHERE.search(text) else 'other_speech'
 
 
 class LocalSpeechWakeGate:
@@ -56,6 +72,7 @@ class LocalSpeechWakeGate:
         self.frames_seen = self.detections = self.checks = self.failures = 0
         self.max_feed_gap_s = 0.0
         self.reset_counts = {}
+        self.miss_counts = dict.fromkeys(MISS_REASONS, 0)
 
     async def _request(self, audio):
         # No environment proxy, redirects, credentials, or transcript logging.
@@ -63,7 +80,12 @@ class LocalSpeechWakeGate:
             response = await client.post(self.url, files={
                 'audio': ('wake.wav', pcm_to_wav(audio), 'audio/wav')})
             response.raise_for_status()
-            return wake_match(response.json().get('text'))
+            text = response.json().get('text')
+            result = wake_match(text)
+            if not result[0]:
+                # Label only: the rejected words are dropped here, uncounted and unlogged.
+                self.miss_counts[miss_reason(text)] += 1
+            return result
 
     async def _check(self, audio):
         try:
