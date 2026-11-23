@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import re
 import time
 
+from pipeline.wake_phrase import strip_wake_prefix
+
 QUESTION = (
     "Orchestrator connection test. Choose option one, blue, or option two, green. "
     "Say Hey Aiden, followed by your choice."
@@ -134,8 +136,7 @@ class VoicePilot:
 
     @staticmethod
     def parse_choice(text: str) -> int | None:
-        normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-        normalized = re.sub(r"^(?:hey )?aiden\b\s*", "", normalized)
+        normalized = re.sub(r"[^a-z0-9]+", " ", strip_wake_prefix(text).lower()).strip()
         return {"one": 1, "1": 1, "option one": 1, "option 1": 1, "blue": 1,
                 "two": 2, "2": 2, "option two": 2, "option 2": 2,
                 "green": 2}.get(normalized)

@@ -27,6 +27,26 @@ class DeviceDiagnosticsTests(unittest.TestCase):
         self.assertEqual(state['last_audio_age_s'], 2)
         self.assertFalse(any(isinstance(v, np.ndarray) for v in vars(device).values()))
 
+    def test_prior_ten_second_frame_count_exposes_lost_audio(self):
+        device = self.device()
+        self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 0)
+        frame = np.zeros(512, dtype=np.int16)
+        for moment in [100.0] * 280 + [110.5] * 5:
+            with patch('pipeline.device.time.monotonic', return_value=moment):
+                device.observe_audio(frame)
+        with patch('pipeline.device.time.monotonic', return_value=111):
+            self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 280)
+        with patch('pipeline.device.time.monotonic', return_value=120.01):
+            # Just past a boundary, before the first frame of the new slot.
+            self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 5)
+        with patch('pipeline.device.time.monotonic', return_value=135):
+            self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 0)
+
+    def test_miss_labels_are_reported(self):
+        device = self.device()
+        device.wake_gate = SimpleNamespace(active=False, miss_counts={'no_text': 2})
+        self.assertEqual(device.to_dict()['listening']['wake_misses'], {'no_text': 2})
+
     def test_processing_and_gate_state_are_distinct(self):
         device = self.device()
         device.processing = True
