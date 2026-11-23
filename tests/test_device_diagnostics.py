@@ -36,6 +36,9 @@ class DeviceDiagnosticsTests(unittest.TestCase):
                 device.observe_audio(frame)
         with patch('pipeline.device.time.monotonic', return_value=111):
             self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 280)
+        with patch('pipeline.device.time.monotonic', return_value=120.01):
+            # Just past a boundary, before the first frame of the new slot.
+            self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 5)
         with patch('pipeline.device.time.monotonic', return_value=125):
             self.assertEqual(device.to_dict()['listening']['audio_frames_prior_10s'], 0)
 

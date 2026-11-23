@@ -68,6 +68,12 @@ class Device:
         self.audio_rms = float(np.sqrt(np.mean(np.square(pcm.astype(np.float32)))))
         self.peak_audio_rms = max(self.peak_audio_rms, self.audio_rms)
 
+    def _frames_prior_slot(self, slot):
+        # The newest slot stays open until the next frame arrives, so check it too.
+        if self._rate_slot == slot:
+            return self._rate_count
+        return self._rate_last[1] if self._rate_last[0] == slot else 0
+
     def to_dict(self) -> dict:
         return {
             "hostname": self.hostname,
@@ -84,9 +90,7 @@ class Device:
                                      if self.last_audio_at is not None else None),
                 "audio_rms": round(self.audio_rms, 1),
                 "peak_audio_rms": round(self.peak_audio_rms, 1),
-                "audio_frames_prior_10s": (self._rate_last[1] if self.last_audio_at is not None
-                                           and self._rate_last[0] == int(time.monotonic() // 10) - 1
-                                           else 0),
+                "audio_frames_prior_10s": self._frames_prior_slot(int(time.monotonic() // 10) - 1),
                 "wake_frames": getattr(self.wake_gate, "frames_seen", None),
                 "wake_model_profile": getattr(self.wake_gate, "model_profile", None),
                 "wake_detections": getattr(self.wake_gate, "detections", None),
