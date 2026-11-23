@@ -32,7 +32,7 @@ def device(stream):
 
 class StreamedSendTests(unittest.IsolatedAsyncioTestCase):
     async def run_pipeline(self, synth, check, *, text="Hello there.", config=CONFIG, gate=None,
-                           gap=0.05, cap=3.0):
+                           gap=0.05, cap=3.0, margin=0.05):
         async def stream(*a, **k):
             yield text
 
@@ -72,6 +72,7 @@ class StreamedSendTests(unittest.IsolatedAsyncioTestCase):
              patch("pipeline.main.send_audio_stream", side_effect=fake_stream), \
              patch("pipeline.main.send_audio", side_effect=plain), \
              patch("pipeline.main.STREAM_GAP_S", gap), \
+             patch("pipeline.main.STREAM_MARGIN_S", margin), \
              patch("pipeline.main.STREAM_SILENCE_CAP_S", cap):
             task = asyncio.create_task(process_utterances(config, None, queue))
             try:
@@ -110,18 +111,36 @@ class StreamedSendTests(unittest.IsolatedAsyncioTestCase):
 
         await self.run_pipeline(synth, check)
 
-    async def test_slow_producer_gets_silence_without_gaps(self):
+    async def test_stalled_producer_gets_silence_before_the_speaker_runs_dry(self):
         async def synth(env):
-            yield PIECE * 3
-            await asyncio.sleep(0.4)
+            yield PIECE * 3          # 0.6 s of audio
+            await asyncio.sleep(1.0)  # longer than the audio already sent
             yield PIECE
 
         async def check(dev, queue, env):
-            await asyncio.wait_for(queue.join(), 3)
+            await asyncio.wait_for(queue.join(), 4)
             total = sum(n for _, n in env.writes)
             self.assertGreater(total, 40)  # 40 real frames plus silence
-            times = [t for t, _ in env.writes]
-            self.assertLess(max(b - a for a, b in zip(times, times[1:])), 0.05 + 0.1)
+            # Audio sent always stays ahead of real-time playback.
+            start = env.writes[0][0]
+            sent = 0
+            for at, n in env.writes:
+                self.assertGreater(sent * 0.02 - (at - start), -0.03) if sent else None
+                sent += n
+            dev.conversation.commit.assert_called_once()
+
+        await self.run_pipeline(synth, check)
+
+    async def test_bursts_slower_than_real_time_get_no_silence_while_buffered(self):
+        async def synth(env):
+            yield PIECE * 6           # 1.2 s buffered before playback starts
+            for _ in range(4):
+                await asyncio.sleep(0.25)  # each 0.2 s burst arrives late
+                yield PIECE
+
+        async def check(dev, queue, env):
+            await asyncio.wait_for(queue.join(), 4)
+            self.assertEqual(sum(n for _, n in env.writes), 100)  # no silence added
             dev.conversation.commit.assert_called_once()
 
         await self.run_pipeline(synth, check)

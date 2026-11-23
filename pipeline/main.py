@@ -376,7 +376,8 @@ async def interruptible_sentences(device, text, extra_context):
         await asyncio.gather(interrupted, return_exceptions=True)
 
 
-STREAM_GAP_S = 0.3           # no audio for this long: send silence instead
+STREAM_GAP_S = 0.1           # length of one silence block sent to avoid an underrun
+STREAM_MARGIN_S = 0.15       # send silence when the speaker has less audio than this left
 STREAM_SILENCE_CAP_S = 3.0   # max silence inserted per sentence
 
 
@@ -605,9 +606,16 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                     async def batches():
                         nonlocal silence_frames, first_at, capped, failed, finished
                         first_at = time.monotonic()
+                        # The speaker starts this sentence when earlier audio ends.
+                        # Synthesis delivers in bursts slower than real time, so
+                        # only fill with silence when the speaker is about to run
+                        # dry, never merely because the next burst is not here yet.
+                        play_start = max(playback_end, first_at)
+                        sent_s = len(pending) * frame_s
                         yield pending
                         while not finished:
-                            item = await next_item(STREAM_GAP_S)
+                            runway = play_start + sent_s - time.monotonic() - STREAM_MARGIN_S
+                            item = await next_item(max(0.001, runway))
                             if item is None or item is done_mark:
                                 return
                             if item is fail_mark:
@@ -618,8 +626,10 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                                     capped = True
                                     return
                                 silence_frames += gap_frames
+                                sent_s += gap_frames * frame_s
                                 yield [silence] * gap_frames
                             else:
+                                sent_s += len(item) * frame_s
                                 yield item
 
                     mic_timeout = dev_cfg["default_mic_timeout"] if is_final else 0
