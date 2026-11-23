@@ -13,10 +13,8 @@ import numpy as np
 
 from pipeline.audio import pcm_to_wav
 from pipeline.vad import VAD
+from pipeline.wake_phrase import GREETING as _GREETING, NAME as _NAME
 
-# Spellings the recognizer uses for the same two sounds; no other names.
-_GREETING = r"(?:hey|hay)"
-_NAME = r"(?:aiden|aidan|ayden|aydan|aidyn|aydin|aden)"
 _PREFIX = re.compile(rf"^\s*{_GREETING}[\s,.!?:;-]+{_NAME}\b[\s,.!?:;-]*", re.IGNORECASE)
 _GREETING_FIRST = re.compile(rf"^\s*{_GREETING}\b[\s,.!?:;-]*(.*)$", re.IGNORECASE | re.DOTALL)
 _NAME_ANYWHERE = re.compile(rf"\b{_NAME}\b", re.IGNORECASE)

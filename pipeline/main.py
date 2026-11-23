@@ -19,6 +19,7 @@ import yaml
 from pipeline.audio import decode_ulaw, opus_encode, opus_frames_to_tcp_payload, pcm_to_wav
 from pipeline.conversation import create_backend, sentence_chunks
 from pipeline.local_wake import LocalSpeechWakeGate
+from pipeline.wake_phrase import strip_wake_prefix
 from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
 from pipeline.protocol import send_audio, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
@@ -413,8 +414,7 @@ async def process_utterances(config: dict, manager: DeviceManager, utterance_que
                 continue
             text = asr_result.get("text", "").strip()
             if wake_gate is not None:
-                text = re.sub(r"^\s*(?:hey[\s,]+)?aiden\b[\s,.!?;:-]*", "", text,
-                              flags=re.IGNORECASE).strip()
+                text = strip_wake_prefix(text)
                 if not text and asr_result.get("text", "").strip():
                     # A separate wake phrase opens one short local command
                     # window. Do not spend an agent turn answering the name.

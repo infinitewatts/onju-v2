@@ -206,6 +206,16 @@ class LocalWakeTests(unittest.IsolatedAsyncioTestCase):
         for text in ['Hey Eden', 'Hey Hayden', 'Hi Aiden', 'Hey Adrian', 'Hey Aidens', 'Okay Aiden']:
             self.assertEqual(wake_match(text), (False, False), text)
 
+    def test_every_admitted_spelling_is_stripped_before_routing(self):
+        from pipeline.wake_phrase import strip_wake_prefix
+        for text in ['Hey Aiden, option one', 'Hey Aidan, option one', 'hay ayden option one',
+                     'Aden: option one', 'Hey Aidyn - option one']:
+            self.assertTrue(wake_match(text)[0] or text.startswith('Aden'), text)
+            self.assertEqual(strip_wake_prefix(text), 'option one', text)
+        self.assertEqual(strip_wake_prefix('Hey Aidan!'), '')
+        for text in ['Hey Eden, option one', 'option one', 'Aidens option']:
+            self.assertEqual(strip_wake_prefix(text), text)
+
     def test_miss_reason_is_a_fixed_label(self):
         cases = {None: 'no_text', '  ': 'no_text', 'Hey': 'greeting_only', 'hay.': 'greeting_only',
                  'Hey Adrian': 'greeting_other_word', 'Harry Aiden': 'name_not_first',
