@@ -15,6 +15,10 @@
 #define MIC_MAX_LAG 3              // samples; 3 at 16 kHz covers mics up to ~64 mm apart
 #define MIC_LAGS (2 * MIC_MAX_LAG + 1)
 #define MIC_DEAD_RATIO 8           // a mic this many times quieter than the other is ignored
+#define MIC_GARBAGE_LEVEL 6000     // sustained level no real room produces: an unconnected or faulty slot
+#define MIC_ALIVE_LEVEL 4          // below this a mic is producing nothing at all
+#define MIC_EXCLUDE_BLOCKS 312     // keep a rejected mic out for about 10 s after the last bad block
+#define MIC_LAG_CONFIRM 6          // blocks a new delay must win in a row before it is used
 
 enum MicMode { MIC_BOTH = 0, MIC_FIRST_ONLY = 1, MIC_SECOND_ONLY = 2 };
 
@@ -24,6 +28,10 @@ struct MicCombiner {
     float corr[MIC_LAGS];          // smoothed alignment score per candidate delay
     int16_t tail[2][MIC_MAX_LAG];  // last samples of the previous block
     int lag;                       // chosen delay: >0 delays the first mic, <0 the second
+    int lag_candidate;             // delay waiting to be confirmed
+    int lag_streak;                // blocks in a row the candidate has won
+    int excluded[2];               // blocks left during which each mic stays rejected
+    bool primed;                   // first block seen
     MicMode mode;
 };
 
@@ -59,11 +67,28 @@ static inline void mic_combine(MicCombiner *m, const int32_t *raw, int frames,
         }
         m->dc[c] = dc;
         memcpy(m->tail[c], ch[c] + frames, sizeof(m->tail[c]));
-        m->level[c] += ((float)sum_abs[c] / frames - m->level[c]) / 16.0f;
+        // The first block sets the level outright, so a slow ramp from zero
+        // cannot make a healthy mic look dead next to a noisy one.
+        float now_level = (float)sum_abs[c] / frames;
+        if (!m->primed) m->level[c] = now_level;
+        else m->level[c] += (now_level - m->level[c]) / 16.0f;
     }
 
-    if (m->level[1] * MIC_DEAD_RATIO < m->level[0]) m->mode = MIC_FIRST_ONLY;
-    else if (m->level[0] * MIC_DEAD_RATIO < m->level[1]) m->mode = MIC_SECOND_ONLY;
+    m->primed = true;
+
+    // Reject a mic that is far quieter than the other (dead or blocked), or one
+    // that is impossibly loud while the other is alive and quiet (a slot with no
+    // working mic reads as noise). A rejected mic stays out for a while, so the
+    // choice cannot flip back and forth mid-sentence.
+    for (int c = 0; c < 2; c++) {
+        float mine = m->level[c], other = m->level[1 - c];
+        bool weak = mine * MIC_DEAD_RATIO < other && other <= MIC_GARBAGE_LEVEL;
+        bool garbage = mine > MIC_GARBAGE_LEVEL && mine > other * MIC_DEAD_RATIO && other >= MIC_ALIVE_LEVEL;
+        if (weak || garbage) m->excluded[c] = MIC_EXCLUDE_BLOCKS;
+        else if (m->excluded[c] > 0) m->excluded[c]--;
+    }
+    if (m->excluded[1] > 0 && m->excluded[0] == 0) m->mode = MIC_FIRST_ONLY;
+    else if (m->excluded[0] > 0 && m->excluded[1] == 0) m->mode = MIC_SECOND_ONLY;
     else m->mode = MIC_BOTH;
 
     if (m->mode != MIC_BOTH) {
@@ -84,11 +109,20 @@ static inline void mic_combine(MicCombiner *m, const int32_t *raw, int frames,
         m->corr[k] += ((float)acc / frames - m->corr[k]) * 0.1f;
         if (m->corr[k] > m->corr[best]) best = k;
     }
-    // Keep zero delay unless another delay is clearly better and the two
-    // microphones really are hearing the same sound (not just their own hiss).
+    // Change the delay only when another one is clearly better than the one
+    // in use, the two mics really are hearing the same sound (not just their
+    // own hiss), and it keeps winning for several blocks. A true delay that
+    // falls between two whole samples would otherwise flip back and forth,
+    // and every flip skips or repeats a sample.
     float coherent = 0.25f * m->level[0] * m->level[1];
-    if (m->corr[best] <= m->corr[MIC_MAX_LAG] * 1.05f || m->corr[best] <= coherent) best = MIC_MAX_LAG;
-    m->lag = best - MIC_MAX_LAG;
+    int current = m->lag + MIC_MAX_LAG;
+    if (best != current && m->corr[best] > m->corr[current] * 1.03f && m->corr[best] > coherent) {
+        if (best - MIC_MAX_LAG == m->lag_candidate) m->lag_streak++;
+        else { m->lag_candidate = best - MIC_MAX_LAG; m->lag_streak = 1; }
+        if (m->lag_streak >= MIC_LAG_CONFIRM) { m->lag = m->lag_candidate; m->lag_streak = 0; }
+    } else {
+        m->lag_streak = 0;
+    }
 
     int d0 = m->lag > 0 ? m->lag : 0, d1 = m->lag < 0 ? -m->lag : 0;
     const int16_t *a = ch[0] + MIC_MAX_LAG - d0, *b = ch[1] + MIC_MAX_LAG - d1;
