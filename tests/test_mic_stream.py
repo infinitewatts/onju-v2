@@ -23,12 +23,12 @@ CONFIG = {
 AUDIO = bytes(range(256)) * 2
 
 
-def packet(seq, audio=AUDIO):
-    return audio + bytes([0xA5, 0x01, seq >> 8, seq & 0xFF])
+def packet(seq, audio=AUDIO, boot=0x5C):
+    return audio + bytes([0xA5, 0x01, boot, seq >> 8, seq & 0xFF])
 
 
 def report(seq=7, rssi=-60):
-    return struct.pack(">4sBHIIIHhbBB", b"OJST", 1, seq, 1, 2, 3, 4, -5, rssi, 6, 0xAB)
+    return struct.pack(">4sBHIIIHhbBBHB", b"OJST", 1, seq, 1, 2, 3, 4, -5, rssi, 6, 0xAB, 2100, 0x5C)
 
 
 class Clock:
@@ -41,18 +41,19 @@ class Clock:
 
 class ParseTests(unittest.TestCase):
     def test_three_kinds_and_garbage(self):
-        self.assertEqual(parse_datagram(AUDIO), ("audio", AUDIO, None))
-        self.assertEqual(parse_datagram(packet(0x0102)), ("audio", AUDIO, 0x0102))
+        self.assertEqual(parse_datagram(AUDIO), ("audio", AUDIO, None, None))
+        self.assertEqual(parse_datagram(packet(0x0102)), ("audio", AUDIO, 0x0102, 0x5C))
         kind, rep = parse_datagram(report())[:2]
         self.assertEqual(kind, "report")
         self.assertEqual(rep, {"seq": 7, "send_fail": 1, "send_retry": 2, "late_reads": 3,
                                "max_read_gap_ms": 4, "last_errno": -5, "rssi": -60,
-                               "channel": 6, "bssid_last": 0xAB})
-        self.assertEqual(REPORT_SIZE, 26)
+                               "channel": 6, "bssid_last": 0xAB, "stack_free": 2100, "boot_id": 0x5C})
+        self.assertEqual(REPORT_SIZE, 29)
         self.assertIsNone(parse_datagram(b""))
         self.assertIsNone(parse_datagram(b"x" * 100))
-        self.assertIsNone(parse_datagram(AUDIO + b"\x00\x01\x00\x00"))  # bad magic
-        self.assertIsNone(parse_datagram(AUDIO + b"\xA5\x02\x00\x00"))  # bad version
+        self.assertIsNone(parse_datagram(AUDIO + b"\x00\x01\x00\x00\x00"))  # bad magic
+        self.assertIsNone(parse_datagram(AUDIO + b"\xA5\x02\x00\x00\x00"))  # bad version
+        self.assertIsNone(parse_datagram(AUDIO + b"\xA5\x01\x00\x00"))      # the 516-byte draft layout
         self.assertIsNone(parse_datagram(b"XXXX" + report()[4:]))
         self.assertIsNone(parse_datagram(report()[:-1]))
 
@@ -107,6 +108,27 @@ class MonitorTests(unittest.TestCase):
         self.feed([150, 151])
         self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (1, 148))
         self.assertEqual(self.m.gap_histogram["16+"], 1)
+
+    def test_device_restart_is_never_loss_wherever_the_old_numbering_was(self):
+        # A new boot id marks the restart, including when the old numbering was
+        # near the wrap point and the jump to zero would look like a forward gap.
+        for old in (5, 500, 40000, 62536, 65000, 65535):
+            with self.subTest(old=old):
+                m = MicStreamMonitor(clock=self.clock)
+                for s in (old - 1, old):
+                    self.clock.t += 0.032
+                    m.observe(s & 0xFFFF, 0x11)
+                self.clock.t += 8
+                for s in (0, 1, 2, 4):
+                    self.clock.t += 0.032
+                    m.observe(s, 0x22)
+                self.assertEqual((m.seq_resets, m.seq_gaps, m.seq_lost, m.seq_reordered), (1, 1, 1, 0))
+
+    def test_same_boot_id_near_wrap_is_real_loss(self):
+        self.clock.t += 0.032; self.m.observe(65000, 0x11)
+        self.clock.t += 8                     # long outage while capturing, no restart
+        self.clock.t += 0.032; self.m.observe(0, 0x11)
+        self.assertEqual((self.m.seq_resets, self.m.seq_lost), (0, 535))
 
     def test_device_restart_resets_without_loss_and_keeps_tracking(self):
         self.feed([500, 501])

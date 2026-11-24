@@ -187,7 +187,7 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
             continue
         data = parsed[1]
         if monitor is not None:
-            monitor.observe(parsed[2])
+            monitor.observe(parsed[2], parsed[3])
 
         now = time.time()
         last_packet_time[device.hostname] = now

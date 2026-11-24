@@ -9,15 +9,16 @@ static void expect(bool ok, const char *what) {
 }
 
 int main() {
-    static_assert(MIC_PACKET_SIZE == 516, "audio packet size");
-    static_assert(MIC_REPORT_SIZE == 26, "report size");
+    static_assert(MIC_PACKET_SIZE == 517, "audio packet size");
+    static_assert(MIC_REPORT_SIZE == 29, "report size");
 
-    uint8_t t[4];
-    mic_trailer_write(t, 0x1234);
-    expect(t[0] == 0xA5 && t[1] == 0x01 && t[2] == 0x12 && t[3] == 0x34, "trailer bytes");
+    uint8_t t[5];
+    mic_trailer_write(t, 0x7E, 0x1234);
+    expect(t[0] == 0xA5 && t[1] == 0x01 && t[2] == 0x7E && t[3] == 0x12 && t[4] == 0x34, "trailer bytes");
 
     MicStreamStats s;
-    mic_stats_init(&s);
+    mic_stats_init(&s, 0x7E);
+    expect(s.boot_id == 0x7E, "boot id kept");
     expect(mic_stats_next_seq(&s) == 0 && mic_stats_next_seq(&s) == 1, "seq starts at 0");
     s.seq = 65535;
     expect(mic_stats_next_seq(&s) == 65535, "last seq");
@@ -43,10 +44,12 @@ int main() {
     s.seq = 0xABCD; s.send_fail = 0x01020304; s.send_retry = 0x05060708;
     s.late_reads = 0x090A0B0C; s.max_read_gap_ms = 0x0D0E; s.last_errno = -2;
     uint8_t r[MIC_REPORT_SIZE];
-    expect(mic_stats_pack_report(&s, -67, 11, 0xEF, r) == 26, "report size returned");
-    const uint8_t want[26] = {'O','J','S','T', 0x01, 0xAB,0xCD, 1,2,3,4, 5,6,7,8, 9,10,11,12,
-                              0x0D,0x0E, 0xFF,0xFE, (uint8_t)-67, 11, 0xEF};
-    expect(std::memcmp(r, want, 26) == 0, "report bytes");
+    expect(mic_stats_pack_report(&s, -67, 11, 0xEF, 0x0A0B, r) == 29, "report size returned");
+    const uint8_t want[29] = {'O','J','S','T', 0x01, 0xAB,0xCD, 1,2,3,4, 5,6,7,8, 9,10,11,12,
+                              0x0D,0x0E, 0xFF,0xFE, (uint8_t)-67, 11, 0xEF, 0x0A,0x0B, 0x7E};
+    expect(std::memcmp(r, want, 29) == 0, "report bytes");
+    mic_stats_pack_report(&s, 0, 0, 0, 500000u, r);
+    expect(r[26] == 0xFF && r[27] == 0xFF, "stack headroom saturates");
     expect(s.max_read_gap_ms == 0, "report resets max gap");
     expect(s.late_reads == 0x090A0B0C, "report keeps other counters");
 

@@ -155,7 +155,6 @@ int16_t convertedMicBuffer[SAMPLE_CHUNK_SIZE]; // For converted values to be sen
 
 volatile bool mute = false; // track state of mute button
 
-uint8_t compressedMicBuffer[SAMPLE_CHUNK_SIZE]; // For μ-law compressed audio
 uint8_t micPacket[MIC_PACKET_SIZE];             // u-law audio + sequence trailer, sent as one UDP packet
 uint8_t micReport[MIC_REPORT_SIZE];             // periodic counter report
 MicStreamStats micStats;
@@ -1005,7 +1004,7 @@ void micTask(void *pvParameters)
     bool prevState = false;
     uint32_t lastReadMs = 0;
     uint32_t framesSinceReport = 0;
-    mic_stats_init(&micStats);
+    mic_stats_init(&micStats, (uint8_t)esp_random());
 
     while (1)
     {
@@ -1044,18 +1043,24 @@ void micTask(void *pvParameters)
             if (USE_COMPRESSION)
             {
                 encode_ulaw(convertedMicBuffer, micPacket, SAMPLE_CHUNK_SIZE);
-                mic_trailer_write(micPacket + MIC_AUDIO_BYTES, mic_stats_next_seq(&micStats));
+                mic_trailer_write(micPacket + MIC_AUDIO_BYTES, micStats.boot_id, mic_stats_next_seq(&micStats));
                 // Rebuild the packet on every try (beginPacket/write/endPacket).
                 uint32_t retries = 0;
                 bool sent = false;
                 int err = 0;
                 for (;;)
                 {
-                    udp.beginPacket(serverIP, udpPort);
-                    udp.write(micPacket, MIC_PACKET_SIZE);
-                    errno = 0;
-                    sent = udp.endPacket() != 0;
-                    if (!sent) err = errno;
+                    if (udp.beginPacket(serverIP, udpPort))
+                    {
+                        udp.write(micPacket, MIC_PACKET_SIZE);
+                        errno = 0;
+                        sent = udp.endPacket() != 0;
+                        if (!sent) err = errno;
+                    }
+                    else
+                    {
+                        err = MIC_ERR_NO_PACKET;
+                    }
                     if (sent || retries >= MIC_SEND_RETRIES) break;
                     retries++;
                     vTaskDelay(pdMS_TO_TICKS(2));
@@ -1067,10 +1072,13 @@ void micTask(void *pvParameters)
                     framesSinceReport = 0;
                     const uint8_t *bssid = WiFi.BSSID();
                     mic_stats_pack_report(&micStats, (int8_t)WiFi.RSSI(), (uint8_t)WiFi.channel(),
-                                          bssid ? bssid[5] : 0, micReport);
-                    udp.beginPacket(serverIP, udpPort);
-                    udp.write(micReport, MIC_REPORT_SIZE);
-                    udp.endPacket();
+                                          bssid ? bssid[5] : 0,
+                                          (uint32_t)uxTaskGetStackHighWaterMark(NULL), micReport);
+                    if (udp.beginPacket(serverIP, udpPort))
+                    {
+                        udp.write(micReport, MIC_REPORT_SIZE);
+                        udp.endPacket();
+                    }
                 }
             }
             else
