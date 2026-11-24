@@ -47,6 +47,17 @@ class FirmwareAudioTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("PASS:", result.stdout)
 
+    def test_mic_stream_stats_under_sanitizers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = str(Path(directory) / "mic-stream-stats-test")
+            subprocess.run(["clang++", "-std=c++11", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", "-fno-sanitize-recover=all",
+                            str(ROOT / "tests/mic_stream_stats_test.cpp"), "-o", binary],
+                           check=True, capture_output=True, text=True)
+            result = subprocess.run([binary], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("PASS:", result.stdout)
+
     def test_speaker_writes_fill_both_bus_slots(self):
         sketch = (ROOT / "onjuino/onjuino.ino").read_text()
         self.assertIn("I2S_CHANNEL_FMT_RIGHT_LEFT", sketch)

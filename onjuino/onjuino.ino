@@ -26,6 +26,8 @@
 #include "credentials.h"
 #include "audio_compression.h"
 #include "mic_combine.h"
+#include "mic_stream_stats.h"
+#include <errno.h>
 
 MicCombiner micCombiner; // two-microphone state; announcePresence reports its health numbers
 
@@ -154,6 +156,9 @@ int16_t convertedMicBuffer[SAMPLE_CHUNK_SIZE]; // For converted values to be sen
 volatile bool mute = false; // track state of mute button
 
 uint8_t compressedMicBuffer[SAMPLE_CHUNK_SIZE]; // For μ-law compressed audio
+uint8_t micPacket[MIC_PACKET_SIZE];             // u-law audio + sequence trailer, sent as one UDP packet
+uint8_t micReport[MIC_REPORT_SIZE];             // periodic counter report
+MicStreamStats micStats;
 
 // Opus decoder
 OpusDecoder *opus_decoder = NULL;
@@ -998,6 +1003,9 @@ void micTask(void *pvParameters)
 
     int counter = 0;
     bool prevState = false;
+    uint32_t lastReadMs = 0;
+    uint32_t framesSinceReport = 0;
+    mic_stats_init(&micStats);
 
     while (1)
     {
@@ -1021,6 +1029,11 @@ void micTask(void *pvParameters)
         {
             size_t bytesRead = 0;
             i2s_read(I2S_NUM, micBuffer, sizeof(micBuffer), &bytesRead, portMAX_DELAY);
+            uint32_t readNow = millis();
+            // The first read after the mic was idle has no meaningful interval.
+            if (prevState)
+                mic_stats_record_read_interval(&micStats, readNow - lastReadMs);
+            lastReadMs = readNow;
 
             // Remove DC per microphone, line the two up and average them
             // (falls back to one microphone if the other is dead).
@@ -1028,19 +1041,44 @@ void micTask(void *pvParameters)
 
             // Transmit audio
             counter++;
-            udp.beginPacket(serverIP, udpPort);
-
             if (USE_COMPRESSION)
             {
-                encode_ulaw(convertedMicBuffer, compressedMicBuffer, SAMPLE_CHUNK_SIZE);
-                udp.write(compressedMicBuffer, SAMPLE_CHUNK_SIZE); // 480 bytes instead of 960
+                encode_ulaw(convertedMicBuffer, micPacket, SAMPLE_CHUNK_SIZE);
+                mic_trailer_write(micPacket + MIC_AUDIO_BYTES, mic_stats_next_seq(&micStats));
+                // Rebuild the packet on every try (beginPacket/write/endPacket).
+                uint32_t retries = 0;
+                bool sent = false;
+                int err = 0;
+                for (;;)
+                {
+                    udp.beginPacket(serverIP, udpPort);
+                    udp.write(micPacket, MIC_PACKET_SIZE);
+                    errno = 0;
+                    sent = udp.endPacket() != 0;
+                    if (!sent) err = errno;
+                    if (sent || retries >= MIC_SEND_RETRIES) break;
+                    retries++;
+                    vTaskDelay(pdMS_TO_TICKS(2));
+                }
+                mic_stats_record_send(&micStats, sent, retries, err);
+
+                if (++framesSinceReport >= MIC_REPORT_EVERY_FRAMES)
+                {
+                    framesSinceReport = 0;
+                    const uint8_t *bssid = WiFi.BSSID();
+                    mic_stats_pack_report(&micStats, (int8_t)WiFi.RSSI(), (uint8_t)WiFi.channel(),
+                                          bssid ? bssid[5] : 0, micReport);
+                    udp.beginPacket(serverIP, udpPort);
+                    udp.write(micReport, MIC_REPORT_SIZE);
+                    udp.endPacket();
+                }
             }
             else
             {
+                udp.beginPacket(serverIP, udpPort);
                 udp.write((uint8_t *)convertedMicBuffer, sizeof(convertedMicBuffer));
+                udp.endPacket();
             }
-
-            udp.endPacket();
             currentState = true;
         }
 

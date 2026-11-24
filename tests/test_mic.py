@@ -61,6 +61,8 @@ def main():
                 data, addr = sock.recvfrom(2048)
                 if args.device_ip and addr[0] != str(args.device_ip):
                     continue
+                if len(data) == CHUNK_BYTES_COMPRESSED + 4 and data[CHUNK_BYTES_COMPRESSED] == 0xA5:
+                    data = data[:CHUNK_BYTES_COMPRESSED]  # drop the sequence trailer
                 if len(data) not in (CHUNK_BYTES_COMPRESSED, CHUNK_BYTES_RAW):
                     continue
 
