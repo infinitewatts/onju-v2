@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pydub")
 
+import httpx
 import numpy as np
 import yaml
 
@@ -379,6 +380,7 @@ async def interruptible_sentences(device, text, extra_context):
 STREAM_GAP_S = 0.1           # length of one silence block sent to avoid an underrun
 STREAM_MARGIN_S = 0.15       # send silence when the speaker has less audio than this left
 DEVICE_SENTENCE_GAP_S = 0.12 # silence the speaker itself plays after each sentence
+KEEP_WARM_SLOW_S = 2.0  # a keep-warm request slower than this is logged as a cold start
 STREAM_SILENCE_CAP_S = 3.0   # max silence inserted per sentence
 
 
@@ -1062,6 +1064,54 @@ async def warmup(config: dict):
     log.info("Warmup complete")
 
 
+async def _warm_asr(config: dict):
+    """One second of silence through the recogniser. The reply is dropped unread."""
+    rate = config["audio"]["sample_rate"]
+    wav = pcm_to_wav(np.zeros(rate, dtype=np.int16), rate=rate)
+    async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+        resp = await client.post(config["asr"]["url"].rstrip("/") + "/transcribe",
+                                 files={"audio": ("warm.wav", wav, "audio/wav")})
+        resp.raise_for_status()
+
+
+async def _warm_tts(config: dict):
+    await tts.synthesize("Hello.", "default", config)
+
+
+async def keep_warm(config: dict, manager, sleep=asyncio.sleep):
+    """Keep the local speech models loaded while nobody is talking.
+
+    After hours idle the first recognition or synthesis request can take many
+    seconds: a wake check then times out (the speaker seems deaf) and the first
+    reply starts late. A tiny request every keep_warm.interval_s seconds avoids
+    that. Off unless the interval is set. Skipped while a turn is in progress.
+    """
+    interval = float((config.get("keep_warm") or {}).get("interval_s") or 0)
+    if interval <= 0:
+        return
+    pings = {"ASR": _warm_asr}
+    if config["tts"]["backend"] == "local":
+        pings["TTS"] = _warm_tts
+
+    async def ping(name, call):
+        t0 = time.monotonic()
+        try:
+            await call(config)
+        except Exception as e:
+            log.warning(f"WARM {name} failed ({time.monotonic() - t0:.1f}s): {type(e).__name__}")
+            return
+        took = time.monotonic() - t0
+        if took > KEEP_WARM_SLOW_S:
+            log.info(f"WARM {name} was cold ({took:.1f}s)")
+
+    log.info(f"  WARM  every {interval:.0f}s: {', '.join(pings)}")
+    while True:
+        await sleep(interval)
+        if any(d.processing for d in manager.devices.values()):
+            continue
+        await asyncio.gather(*(ping(name, call) for name, call in pings.items()))
+
+
 def _parse_device_arg(entry: str) -> tuple[str, str, bool]:
     """Parse device arg like 'name=ip:ptt' or 'ip:ptt' or 'ip'."""
     ptt = False
@@ -1130,6 +1180,7 @@ async def main(config_path: str = None, do_warmup: bool = False, devices: list[s
         process_utterances(config, manager, utterance_queue, pilot, bridge),
         control_server(config, manager, pilot, bridge),
         maintain_wake_audio(config, manager),
+        keep_warm(config, manager),
     )]
     try:
         await asyncio.gather(*tasks)
