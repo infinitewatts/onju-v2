@@ -5,6 +5,7 @@ import time
 import numpy as np
 
 from pipeline.conversation import ConversationBackend, create_backend
+from pipeline.mic_stream import MicStreamMonitor
 from pipeline.vad import VAD
 from pipeline.security import validate_device
 
@@ -37,6 +38,7 @@ class Device:
         self.ptt_buffer: list = []  # raw PCM frames during PTT
         self.processing = False     # True while ASR/LLM/TTS pipeline is running
         self.interrupted = asyncio.Event()
+        self.mic_stream = MicStreamMonitor()
         self.audio_frames = 0
         self.last_audio_at = None
         self.audio_rms = 0.0
@@ -99,6 +101,7 @@ class Device:
                 "wake_max_feed_gap_s": getattr(self.wake_gate, "max_feed_gap_s", None),
                 "wake_resets": getattr(self.wake_gate, "reset_counts", None),
                 "wake_misses": getattr(self.wake_gate, "miss_counts", None),
+                "mic_stream": self.mic_stream.to_dict(),
             },
         }
 

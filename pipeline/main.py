@@ -23,6 +23,7 @@ from pipeline.local_wake import LocalSpeechWakeGate
 from pipeline.wake_phrase import strip_wake_prefix
 from pipeline.conversation import stall as stall_mod
 from pipeline.device import Device, DeviceManager
+from pipeline.mic_stream import parse_datagram
 from pipeline.protocol import StreamStats, send_audio, send_audio_stream, send_led_blink, send_stop_listening, open_led_connection, write_led_blink, close_led_connection
 from pipeline.services import asr, tts
 from pipeline.security import validate_device
@@ -176,8 +177,17 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
         device = manager.get_by_ip(addr[0])
         if device is None:
             continue
-        if len(data) != chunk_bytes:
+        parsed = parse_datagram(data, chunk_bytes)
+        if parsed is None:
             continue
+        monitor = getattr(device, "mic_stream", None)
+        if parsed[0] == "report":
+            if monitor is not None:
+                monitor.observe_report(parsed[1])
+            continue
+        data = parsed[1]
+        if monitor is not None:
+            monitor.observe(parsed[2], parsed[3])
 
         now = time.time()
         last_packet_time[device.hostname] = now
