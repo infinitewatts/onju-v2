@@ -58,12 +58,53 @@ class WavStreamParserTests(unittest.TestCase):
     def test_bad_data_lengths_fail(self):
         wav = bytearray(make_wav(pcm_of(100)))
         idx = wav.index(b"data") + 4
-        for bad in (0, 0xFFFFFFFF, 10_000_000):
+        for bad in (0xFFFFFFFF, 10_000_000, 99):
             with self.subTest(bad=bad):
                 w = bytearray(wav)
                 w[idx:idx + 4] = struct.pack("<I", bad)
                 with self.assertRaises(WavStreamError):
-                    WavStreamParser().feed(bytes(w))
+                    parser = WavStreamParser()
+                    parser.feed(bytes(w))
+                    parser.finish()
+
+    def test_riff_size_field_is_not_trusted(self):
+        # The local TTS server writes a RIFF size 8 bytes short of the real file.
+        def server_wav(pcm):
+            w = bytearray(make_wav(pcm))
+            w[4:8] = struct.pack("<I", len(pcm) + 28)
+            return bytes(w)
+
+        stream = b"".join(server_wav(p) for p in self.pcms)
+        for wrong in (0, 1, 0xFFFFFFFF):
+            w = bytearray(stream)
+            w[4:8] = struct.pack("<I", wrong)
+            for step in (len(w), 1, 7, 19244):
+                with self.subTest(wrong=wrong, step=step):
+                    chunks = [bytes(w[i:i + step]) for i in range(0, len(w), step)]
+                    self.assertEqual(join(self.run_chunks(chunks)), self.expected)
+
+    def test_recorded_server_layout(self):
+        # Shape captured from the live server: 0.4 s pieces at 24 kHz, each a
+        # 44-byte header whose RIFF size is data + 28, the last piece shorter.
+        pcms = [pcm_of(9600, k) for k in range(1, 5)] + [pcm_of(7680, 5)]
+        stream = b"".join(
+            b"RIFF" + struct.pack("<I", len(p) + 28) + b"WAVEfmt " +
+            struct.pack("<IHHIIHH", 16, 1, 1, 24000, 48000, 2, 16) +
+            b"data" + struct.pack("<I", len(p)) + p for p in pcms)
+        self.assertEqual(len(stream), 92380)
+        chunks = [stream[i:i + 19244] for i in range(0, len(stream), 19244)]
+        self.assertEqual(join(self.run_chunks(chunks)), b"".join(pcms))
+
+    def test_file_without_audio_chunk_fails(self):
+        header_only = make_wav(pcm_of(10))[:36]  # RIFF + fmt, no data chunk
+        with self.assertRaises(WavStreamError):
+            parser = WavStreamParser()
+            parser.feed(header_only + make_wav(pcm_of(10)))
+            parser.finish()
+        with self.assertRaises(WavStreamError):
+            parser = WavStreamParser()
+            parser.feed(header_only)
+            parser.finish()
 
     def test_empty_final_piece_is_accepted(self):
         for stream in (make_wav(pcm_of(100)) + make_wav(b""),
@@ -80,13 +121,15 @@ class WavStreamParserTests(unittest.TestCase):
 
     def test_bad_riff_and_garbage_fail(self):
         wav = bytearray(make_wav(pcm_of(100)))
-        for off, val in ((4, 0), (4, 0xFFFFFFFF)):
-            w = bytearray(wav)
-            w[off:off + 4] = struct.pack("<I", val)
-            with self.assertRaises(WavStreamError):
-                WavStreamParser().feed(bytes(w))
+        wav[8:12] = b"AVI "
+        with self.assertRaises(WavStreamError):
+            WavStreamParser().feed(bytes(wav))
         with self.assertRaises(WavStreamError):
             WavStreamParser().feed(b"ID3" + b"\x00" * 40)
+        with self.assertRaises(WavStreamError):
+            parser = WavStreamParser()
+            parser.feed(make_wav(pcm_of(100)) + b"junk-after-the-file")
+            parser.finish()
 
     def test_truncated_stream_fails_on_finish(self):
         parser = WavStreamParser()

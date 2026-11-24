@@ -34,16 +34,20 @@ class WavStreamParser:
     feed(bytes) returns a list of (sample_rate, channels, sample_width, pcm)
     tuples. PCM is aligned to whole sample blocks; leftover bytes wait for the
     next feed. Anything suspicious raises WavStreamError rather than guessing.
+
+    The total size in each RIFF header is not used: the local TTS server writes
+    a value 8 bytes short of the real file. A file ends where the next "RIFF"
+    header (or the end of the stream) follows a complete chunk.
     """
 
     _MAX_SKIP = 1 << 20
+    _MAX_DATA = 64 << 20
 
     def __init__(self):
         self._buf = bytearray()
         self._state = "riff"
-        self._riff_end = 0      # absolute offset where the current RIFF ends
-        self._pos = 0           # absolute offset of the start of _buf
         self._fmt = None
+        self._has_data = True   # nothing is owed before the first file starts
         self._remaining = 0     # bytes left in the current data/skip chunk
         self._pad = 0
 
@@ -52,7 +56,6 @@ class WavStreamParser:
             return None
         out = bytes(self._buf[:n])
         del self._buf[:n]
-        self._pos += n
         return out
 
     def feed(self, data: bytes) -> list:
@@ -63,16 +66,17 @@ class WavStreamParser:
                 head = self._take(12)
                 if head is None:
                     break
-                size = struct.unpack("<I", head[4:8])[0]
                 if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
                     raise WavStreamError("not a RIFF/WAVE stream")
-                if size in (0, 0xFFFFFFFF) or size < 4:
-                    raise WavStreamError("untrusted RIFF size")
-                self._riff_end = self._pos - 12 + 8 + size
                 self._fmt = None
+                self._has_data = False
                 self._state = "chunk"
             elif self._state == "chunk":
-                if self._pos == self._riff_end:
+                if len(self._buf) < 4:
+                    break
+                if self._buf[:4] == b"RIFF":  # the next file starts here
+                    if not self._has_data:
+                        raise WavStreamError("WAV file without audio data")
                     self._state = "riff"
                     continue
                 head = self._take(8)
@@ -86,19 +90,17 @@ class WavStreamParser:
                 elif cid == b"data":
                     if self._fmt is None:
                         raise WavStreamError("data before fmt")
-                    # An empty final piece is fine only when the file really ends there.
-                    if size == 0xFFFFFFFF or (size == 0 and self._pos != self._riff_end):
+                    if size > self._MAX_DATA:
                         raise WavStreamError("untrusted data length")
                     if size % (self._fmt[1] * self._fmt[2]):
                         raise WavStreamError("data length not block aligned")
+                    self._has_data = True
                     self._remaining, self._state = size, "data"
                 else:
                     if size > self._MAX_SKIP:
                         raise WavStreamError("oversized unknown chunk")
                     self._remaining, self._state = size, "skip"
                 self._pad = size & 1
-                if self._pos + size + self._pad > self._riff_end:
-                    raise WavStreamError("chunk overruns RIFF size")
             elif self._state == "fmt":
                 body = self._take(self._remaining)
                 if body is None:
@@ -109,10 +111,8 @@ class WavStreamParser:
                 self._fmt = (rate, ch, bits // 8)
                 self._state = "pad"
             elif self._state == "skip":
-                n = min(self._remaining, len(self._buf))
-                if n < self._remaining:
+                if self._take(self._remaining) is None:
                     break
-                self._take(n)
                 self._state = "pad"
             elif self._state == "data":
                 if self._remaining == 0:  # empty piece: nothing to emit
@@ -135,8 +135,7 @@ class WavStreamParser:
 
     def finish(self):
         """Raise if the stream ended mid-file."""
-        if self._buf or self._state not in ("chunk", "riff") or (
-                self._state == "chunk" and self._pos != self._riff_end):
+        if self._buf or self._state not in ("chunk", "riff") or not self._has_data:
             raise WavStreamError("stream ended mid-WAV")
 
 
