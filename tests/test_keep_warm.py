@@ -55,6 +55,37 @@ class KeepWarmTests(unittest.IsolatedAsyncioTestCase):
         asr, tts, _ = await self.run_rounds(CONFIG, {"a": busy})
         self.assertEqual((asr.await_count, tts.await_count), (0, 0))
 
+    async def test_skips_while_someone_is_speaking_then_resumes(self):
+        dev = SimpleNamespace(processing=False, wake_gate=SimpleNamespace(active=True))
+        manager_devices = {"a": dev}
+        calls = []
+
+        async def asr(config):
+            calls.append("asr")
+
+        seen = []
+
+        async def sleep(seconds):
+            seen.append(seconds)
+            if len(seen) == 2:
+                dev.wake_gate.active = False  # the turn is over
+            if len(seen) > 2:
+                raise Stop
+
+        with patch("pipeline.main._warm_asr", asr), patch("pipeline.main._warm_tts", AsyncMock()):
+            with self.assertRaises(Stop):
+                await keep_warm(CONFIG, SimpleNamespace(devices=manager_devices), sleep=sleep)
+        self.assertEqual(calls, ["asr"])
+
+    async def test_bad_or_empty_settings_turn_it_off(self):
+        for value in (None, 5, {"interval_s": "abc"}, {"interval_s": 0}, {"interval_s": float("nan")}):
+            asr, tts, seen = await self.run_rounds({**CONFIG, "keep_warm": value}, {})
+            self.assertEqual((asr.await_count, seen), (0, []), value)
+
+    async def test_interval_has_a_floor(self):
+        _, _, seen = await self.run_rounds({**CONFIG, "keep_warm": {"interval_s": 1}}, {}, rounds=0)
+        self.assertEqual(seen, [10.0])
+
     async def test_remote_tts_is_not_pinged(self):
         config = {**CONFIG, "tts": {"backend": "elevenlabs"}}
         asr, tts, _ = await self.run_rounds(config, {})

@@ -380,7 +380,6 @@ async def interruptible_sentences(device, text, extra_context):
 STREAM_GAP_S = 0.1           # length of one silence block sent to avoid an underrun
 STREAM_MARGIN_S = 0.15       # send silence when the speaker has less audio than this left
 DEVICE_SENTENCE_GAP_S = 0.12 # silence the speaker itself plays after each sentence
-KEEP_WARM_SLOW_S = 2.0  # a keep-warm request slower than this is logged as a cold start
 STREAM_SILENCE_CAP_S = 3.0   # max silence inserted per sentence
 
 
@@ -1064,6 +1063,18 @@ async def warmup(config: dict):
     log.info("Warmup complete")
 
 
+KEEP_WARM_SLOW_S = 2.0  # a keep-warm request slower than this is logged as a cold start
+KEEP_WARM_MIN_S = 10.0  # shortest allowed interval
+
+
+def _device_busy(device) -> bool:
+    """Someone is talking to this device, or it is answering."""
+    return bool(device.processing or getattr(device, "queued_utterances", 0) > 0
+                or getattr(device, "ptt_buffer", None)
+                or getattr(getattr(device, "vad", None), "recording", False)
+                or getattr(getattr(device, "wake_gate", None), "active", False))
+
+
 async def _warm_asr(config: dict):
     """One second of silence through the recogniser. The reply is dropped unread."""
     rate = config["audio"]["sample_rate"]
@@ -1084,11 +1095,17 @@ async def keep_warm(config: dict, manager, sleep=asyncio.sleep):
     After hours idle the first recognition or synthesis request can take many
     seconds: a wake check then times out (the speaker seems deaf) and the first
     reply starts late. A tiny request every keep_warm.interval_s seconds avoids
-    that. Off unless the interval is set. Skipped while a turn is in progress.
+    that. Off unless the interval is set. Skipped while someone is talking to a
+    device or it is answering.
     """
-    interval = float((config.get("keep_warm") or {}).get("interval_s") or 0)
-    if interval <= 0:
+    try:
+        interval = float((config.get("keep_warm") or {}).get("interval_s") or 0)
+    except (AttributeError, TypeError, ValueError):
+        log.warning("keep_warm disabled: interval_s is not a number")
         return
+    if not interval > 0:  # also false for nan
+        return
+    interval = max(interval, KEEP_WARM_MIN_S)
     pings = {"ASR": _warm_asr}
     if config["tts"]["backend"] == "local":
         pings["TTS"] = _warm_tts
@@ -1107,7 +1124,7 @@ async def keep_warm(config: dict, manager, sleep=asyncio.sleep):
     log.info(f"  WARM  every {interval:.0f}s: {', '.join(pings)}")
     while True:
         await sleep(interval)
-        if any(d.processing for d in manager.devices.values()):
+        if any(_device_busy(d) for d in manager.devices.values()):
             continue
         await asyncio.gather(*(ping(name, call) for name, call in pings.items()))
 
