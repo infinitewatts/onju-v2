@@ -4,12 +4,13 @@ From across a room speech reaches the board clean but quiet (about -40 dBFS).
 The speech detector that guards the wake check is level sensitive: at that
 level its probability never reaches the onset threshold, so the wake phrase is
 never even examined. This raises quiet audio toward a fixed peak level, one
-32 ms frame at a time, and never clips loud audio.
+32 ms frame at a time, without clipping.
 
-The gain for a frame comes from a peak envelope that jumps up at once on a loud
-frame and falls back slowly, so gain drops immediately when someone speaks up
-close and recovers gradually afterwards. Gain is bounded: silence is never
-amplified by more than max_gain.
+Gain follows a peak envelope that rises at once and falls back slowly. Output
+runs one frame (32 ms) behind the input so the gain can ease down across the
+frame *before* a loud one, instead of stepping or clipping at the first
+syllable after silence. Gain is bounded: silence is never amplified by more
+than max_gain, and audio already at the target level passes through unchanged.
 """
 import math
 
@@ -25,7 +26,9 @@ class AutoGain:
         self.max_gain = float(max_gain)
         self._decay = math.exp(-frame_s / release_s)
         self._envelope = 0.0
-        self.gain = 1.0  # last applied gain, for diagnostics only
+        self._held = None       # the frame waiting to go out
+        self._held_peak = 0.0
+        self.gain = 1.0         # gain at the end of the last frame sent out
 
     @classmethod
     def from_config(cls, config: dict):
@@ -39,16 +42,21 @@ class AutoGain:
                    frame_s=audio["chunk_size"] / audio["sample_rate"])
 
     def process(self, pcm: np.ndarray) -> np.ndarray:
-        """Return the frame with gain applied (int16 in, int16 out).
+        """Take one frame in, return the previous frame with gain applied.
 
-        Gain moves from the previous frame's value to this frame's across the
-        frame, so a change never lands as a step in the waveform.
+        int16 in, int16 out, same length. The first call returns silence.
         """
-        peak = float(np.max(np.abs(pcm.astype(np.int32)))) if pcm.size else 0.0
+        peak_next = float(np.max(np.abs(pcm.astype(np.int32)))) if pcm.size else 0.0
+        frame, peak = self._held, self._held_peak
+        self._held, self._held_peak = pcm, peak_next
+        if frame is None:
+            return np.zeros_like(pcm)
         self._envelope = max(peak, self._envelope * self._decay)
-        previous = self.gain
-        self.gain = max(1.0, min(self.max_gain, self.target_peak / max(self._envelope, 1.0)))
-        if previous == 1.0 and self.gain == 1.0:
-            return pcm
-        ramp = np.linspace(previous, self.gain, pcm.size, endpoint=True, dtype=np.float32)
-        return np.clip(pcm.astype(np.float32) * ramp, -32768, 32767).astype(np.int16)
+        # End this frame at a gain the next frame can also take.
+        end = max(1.0, min(self.max_gain, self.target_peak / max(self._envelope, peak_next, 1.0)))
+        start = min(self.gain, 32767.0 / peak) if peak else self.gain
+        self.gain = end
+        if start == 1.0 and end == 1.0:
+            return frame
+        ramp = np.linspace(start, end, frame.size, endpoint=True, dtype=np.float32)
+        return np.clip(frame.astype(np.float32) * ramp, -32768, 32767).astype(np.int16)
