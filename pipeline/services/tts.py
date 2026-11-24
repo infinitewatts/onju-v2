@@ -115,6 +115,9 @@ class WavStreamParser:
                 self._take(n)
                 self._state = "pad"
             elif self._state == "data":
+                if self._remaining == 0:  # empty piece: nothing to emit
+                    self._state = "pad"
+                    continue
                 block = self._fmt[1] * self._fmt[2]
                 n = min(self._remaining, len(self._buf))
                 n -= n % block
