@@ -218,12 +218,56 @@ class SynthesizeStreamTests(unittest.IsolatedAsyncioTestCase):
             await gen.aclose()
         self.assertTrue(response.closed)
 
-    async def test_bad_stream_raises(self):
+    async def test_bad_stream_before_audio_falls_back_to_one_shot(self):
         wav = bytearray(make_wav(pcm_of(100)))
         wav[wav.index(b"data") + 4:wav.index(b"data") + 8] = struct.pack("<I", 0)
         factory, _, _ = fake_client([bytes(wav)])
-        with patch("pipeline.services.tts.httpx.AsyncClient", factory):
+        with patch("pipeline.services.tts.httpx.AsyncClient", factory), \
+                patch("pipeline.services.tts._local", AsyncMock(return_value=b"\x02\x00" * 8)) as one_shot:
+            with self.assertLogs("pipeline.services.tts", "WARNING") as logs:
+                out = [p async for p in synthesize_stream("Hi there.", "v", cfg(stream=True))]
+        self.assertEqual(out, [b"\x02\x00" * 8])
+        one_shot.assert_awaited_once()
+        self.assertEqual(one_shot.await_args.args[0], "Hi there.")
+        # The log line names the error type only, never the sentence.
+        self.assertNotIn("Hi there", logs.output[0])
+
+    async def test_http_error_before_audio_falls_back_to_one_shot(self):
+        import httpx
+        factory, client, _ = fake_client([])
+        client.stream.return_value.__aenter__ = AsyncMock(side_effect=httpx.ConnectError("down"))
+        with patch("pipeline.services.tts.httpx.AsyncClient", factory), \
+                patch("pipeline.services.tts._local", AsyncMock(return_value=b"\x03\x00" * 4)) as one_shot:
+            out = [p async for p in synthesize_stream("Hi.", "v", cfg(stream=True))]
+        self.assertEqual(out, [b"\x03\x00" * 4])
+        one_shot.assert_awaited_once()
+
+    async def test_stream_without_audio_falls_back_to_one_shot(self):
+        factory, _, _ = fake_client([])
+        with patch("pipeline.services.tts.httpx.AsyncClient", factory), \
+                patch("pipeline.services.tts._local", AsyncMock(return_value=b"\x04\x00" * 4)) as one_shot:
+            out = [p async for p in synthesize_stream("Hi.", "v", cfg(stream=True))]
+        self.assertEqual(out, [b"\x04\x00" * 4])
+        one_shot.assert_awaited_once()
+
+    async def test_failure_after_audio_raises_without_second_attempt(self):
+        good = make_wav(pcm_of(2400))
+        factory, _, _ = fake_client([good, good[:30]])  # second file cut off mid-header
+        got = []
+        with patch("pipeline.services.tts.httpx.AsyncClient", factory), \
+                patch("pipeline.services.tts._local", AsyncMock()) as one_shot:
             with self.assertRaises(WavStreamError):
+                async for p in synthesize_stream("Hi.", "v", cfg(stream=True)):
+                    got.append(p)
+        self.assertTrue(got)
+        one_shot.assert_not_awaited()
+
+    async def test_fallback_failure_still_raises(self):
+        import httpx
+        factory, _, _ = fake_client([b"not a wav at all"])
+        with patch("pipeline.services.tts.httpx.AsyncClient", factory), \
+                patch("pipeline.services.tts._local", AsyncMock(side_effect=httpx.ReadTimeout("slow"))):
+            with self.assertRaises(httpx.ReadTimeout):
                 _ = [p async for p in synthesize_stream("Hi.", "v", cfg(stream=True))]
 
     async def test_flag_off_yields_once_via_synthesize(self):

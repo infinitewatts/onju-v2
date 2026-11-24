@@ -143,7 +143,9 @@ async def synthesize_stream(text: str, voice: str, config: dict):
     """Yield 16 kHz mono 16-bit PCM pieces as the TTS backend produces them.
 
     Only the local backend with tts.local.stream enabled really streams; every
-    other case yields the one-shot synthesize() result once.
+    other case yields the one-shot synthesize() result once. If the stream fails
+    or ends before any audio, the sentence is synthesized one-shot instead, so
+    a streaming fault costs time, not the reply. A failure after audio raises.
     """
     tts_cfg = config["tts"]
     local_cfg = tts_cfg.get("local") or {}
@@ -160,20 +162,34 @@ async def synthesize_stream(text: str, voice: str, config: dict):
     parser = WavStreamParser()
     rate_state = None
     state_rate = None
-    async with httpx.AsyncClient(timeout=120) as client:
-        async with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            async for chunk in resp.aiter_bytes():
-                for rate, channels, width, pcm in parser.feed(chunk):
-                    if channels == 2:
-                        pcm = audioop.tomono(pcm, width, 0.5, 0.5)
-                    if rate != 16000:
-                        if rate != state_rate:
-                            rate_state, state_rate = None, rate
-                        pcm, rate_state = audioop.ratecv(pcm, width, 1, rate, 16000, rate_state)
-                    if pcm:
-                        yield pcm
-            parser.finish()
+    started = False
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("POST", url, json=payload) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes():
+                    for rate, channels, width, pcm in parser.feed(chunk):
+                        if channels == 2:
+                            pcm = audioop.tomono(pcm, width, 0.5, 0.5)
+                        if rate != 16000:
+                            if rate != state_rate:
+                                rate_state, state_rate = None, rate
+                            pcm, rate_state = audioop.ratecv(pcm, width, 1, rate, 16000, rate_state)
+                        if pcm:
+                            started = True
+                            yield pcm
+                parser.finish()
+    except (httpx.HTTPError, WavStreamError) as e:
+        # Once audio has gone out, a second attempt would say the start of the
+        # sentence twice. Before that, nothing has been heard: try the plain way.
+        if started:
+            raise
+        log.warning("TTS  stream failed before any audio (%s); using one-shot synthesis",
+                    type(e).__name__)
+    if not started:
+        # Also covers a stream that ended cleanly without audio. The text is
+        # already normalized, so call the backend directly.
+        yield await _local(text, config)
 
 
 async def _elevenlabs(text: str, voice_name: str, config: dict) -> bytes:
