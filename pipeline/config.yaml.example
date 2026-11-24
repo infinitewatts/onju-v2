@@ -161,6 +161,15 @@ audio:
   sample_rate: 16000
   chunk_size: 512                            # 32ms at 16kHz (matches ESP32 SAMPLE_CHUNK_SIZE)
   opus_frame_size: 320                       # 20ms at 16kHz
+  # Automatic level control for voice-activated devices. From across a room
+  # speech arrives clean but too quiet for the speech detector, so the wake
+  # phrase is never checked. Quiet audio is raised toward target_peak (never by
+  # more than max_gain); loud audio is left alone and never clipped.
+  auto_gain:
+    enabled: false
+    target_peak: 24000                       # of 32767
+    max_gain: 16
+    release_s: 1.0                           # how fast gain recovers after loud sound
 
 device:
   default_volume: 15

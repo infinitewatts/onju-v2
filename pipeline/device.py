@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 
+from pipeline.auto_gain import AutoGain
 from pipeline.conversation import ConversationBackend, create_backend
 from pipeline.vad import VAD
 from pipeline.security import validate_device
@@ -27,6 +28,8 @@ class Device:
             self.voice = el_cfg.get("default_voice", "Emma")
         self.ptt = ptt
         self.vad = None if ptt else VAD(config)
+        # Push-to-talk is spoken into the device; only open-room listening needs lifting.
+        self.auto_gain = None if ptt else AutoGain.from_config(config)
         self.last_user_text: str | None = None
         self.last_response: str | None = None
         self.led_power = 0
@@ -91,6 +94,7 @@ class Device:
                 "audio_rms": round(self.audio_rms, 1),
                 "peak_audio_rms": round(self.peak_audio_rms, 1),
                 "audio_frames_prior_10s": self._frames_prior_slot(int(time.monotonic() // 10) - 1),
+                "auto_gain": round(self.auto_gain.gain, 1) if self.auto_gain is not None else None,
                 "wake_frames": getattr(self.wake_gate, "frames_seen", None),
                 "wake_model_profile": getattr(self.wake_gate, "model_profile", None),
                 "wake_detections": getattr(self.wake_gate, "detections", None),
