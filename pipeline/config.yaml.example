@@ -134,6 +134,12 @@ tts:
       Emma: "56bWURjYFHyYyVf490Dp"          # female, better on small speakers
       Rachel: "21m00Tcm4TlvDq8ikWAM"        # add your voice IDs here
 
+# Keep the local speech models loaded. After hours idle the first request can
+# take many seconds, so a wake phrase is missed and the first reply is slow.
+# Seconds between tiny keep-warm requests; 0 turns it off.
+keep_warm:
+  interval_s: 0
+
 vad:
   threshold: 0.5                             # speech onset probability
   neg_threshold: 0.35                        # speech offset probability (hysteresis)
