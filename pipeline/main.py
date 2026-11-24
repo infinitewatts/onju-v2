@@ -192,7 +192,12 @@ async def udp_listener(config: dict, manager: DeviceManager, utterance_queue: as
         now = time.time()
         last_packet_time[device.hostname] = now
         pcm = decode_ulaw(data)
-        device.observe_audio(pcm)
+        device.observe_audio(pcm)  # level telemetry stays on the raw microphone signal
+        auto_gain = getattr(device, "auto_gain", None)
+        if auto_gain is not None:
+            # From across the room speech is too quiet for the speech detector
+            # that guards the wake check. Everything downstream hears this level.
+            pcm = auto_gain.process(pcm)
 
         frames = [pcm]
         wake_gate = getattr(device, "wake_gate", None)
