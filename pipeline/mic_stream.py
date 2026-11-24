@@ -25,7 +25,7 @@ REPORT_FIELDS = ("seq", "send_fail", "send_retry", "late_reads", "max_read_gap_m
                  "last_errno", "rssi", "channel", "bssid_last")
 
 MAX_GAP = 3000        # a bigger jump is a restart, not loss
-SILENCE_RESET_S = 2.0  # mic is deliberately silent during playback and mute
+SILENCE_RESET_S = 2.0  # after this long without packets, a backward jump is a device restart
 BUCKETS = ("1", "2-3", "4-7", "8-15", "16+")
 
 
@@ -77,24 +77,24 @@ class MicStreamMonitor:
         self.seq_packets += 1
         silent = self._last_at is None or now - self._last_at > SILENCE_RESET_S
         self._last_at = now
-        if self._expected is None or silent:
-            if self._expected is not None:
-                self.seq_resets += 1
+        if self._expected is None:
             self._expected = (seq + 1) & 0xFFFF
             return
         delta = (seq - self._expected) & 0xFFFF
         if delta == 0:
-            self._expected = (seq + 1) & 0xFFFF
+            pass
         elif delta <= MAX_GAP:
+            # Counted even after a long silence: the device numbers only the
+            # frames it captured, so playback, mute and reconnects leave no gap.
             self.seq_gaps += 1
             self.seq_lost += delta
             self.gap_histogram[_bucket(delta)] += 1
-            self._expected = (seq + 1) & 0xFFFF
-        elif delta >= 0x10000 - MAX_GAP:
+        elif not silent and delta >= 0x10000 - MAX_GAP:
             self.seq_reordered += 1  # late or duplicate; expectation stays put
+            return
         else:
-            self.seq_resets += 1
-            self._expected = (seq + 1) & 0xFFFF
+            self.seq_resets += 1     # device restarted (numbering began again) or a huge jump
+        self._expected = (seq + 1) & 0xFFFF
 
     def observe_report(self, report: dict):
         self.report = dict(report)

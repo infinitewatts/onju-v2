@@ -85,20 +85,35 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(self.m.seq_gaps, 0)
         self.feed([4])
         self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (1, 2))
-        self.feed([65530, 65531])  # restart-like jump far behind: reset, no loss
-        self.assertEqual(self.m.seq_lost, 2)
+        self.feed([3])             # one packet arriving late
+        self.assertEqual((self.m.seq_reordered, self.m.seq_lost), (1, 2))
+        self.feed([5])             # the stream carries on where it was
+        self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (1, 2))
 
     def test_gap_across_wrap(self):
         self.feed([65534, 1])
         self.assertEqual(self.m.seq_lost, 2)
 
-    def test_reset_after_silence(self):
+    def test_silence_without_a_gap_is_not_loss(self):
+        # Playback, mute and reconnects stop capture; numbering resumes where it stopped.
+        self.feed([0, 1])
+        self.clock.t += 30
+        self.feed([2, 3])
+        self.assertEqual((self.m.seq_gaps, self.m.seq_lost, self.m.seq_resets), (0, 0, 0))
+
+    def test_outage_while_capturing_is_counted_after_silence(self):
         self.feed([0, 1])
         self.clock.t += 5
-        self.m.observe(500)
-        self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (0, 0))
-        self.feed([501, 503])
-        self.assertEqual(self.m.seq_lost, 1)
+        self.feed([150, 151])
+        self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (1, 148))
+        self.assertEqual(self.m.gap_histogram["16+"], 1)
+
+    def test_device_restart_resets_without_loss_and_keeps_tracking(self):
+        self.feed([500, 501])
+        self.clock.t += 8            # reboot takes seconds
+        self.feed([0, 1, 2, 4])      # numbering began again; then one real loss
+        self.assertEqual((self.m.seq_resets, self.m.seq_reordered), (1, 0))
+        self.assertEqual((self.m.seq_gaps, self.m.seq_lost), (1, 1))
 
     def test_huge_gap_resets(self):
         self.feed([0, 3001 + 1])
